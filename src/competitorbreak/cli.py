@@ -7,9 +7,10 @@ from rich.console import Console
 from rich.table import Table
 
 from . import db, reports
-from .collector import collect_competitor
+from .collector import collect_competitor, collect_serp
 from .config import Settings, load_settings
 from .scraper import Fetcher
+from .serp import SerpScraper
 
 console = Console()
 
@@ -129,19 +130,64 @@ def collect(ctx: click.Context, domain: str | None, max_pages: int | None) -> No
         if not targets:
             raise click.ClickException("No competitors tracked. Run `sync-config` first.")
 
-        for comp in targets:
-            console.print(f"[bold]{comp['domain']}[/bold]")
-            res = collect_competitor(
-                conn, fetcher, comp,
-                blog_patterns=s.blog_path_patterns,
-                max_pages=max_pages,
+        try:
+            for comp in targets:
+                console.print(f"[bold]{comp['domain']}[/bold]")
+                res = collect_competitor(
+                    conn, fetcher, comp,
+                    blog_patterns=s.blog_path_patterns,
+                    max_pages=max_pages,
+                    log=lambda m: console.print(m, style="dim"),
+                )
+                console.print(
+                    f"  [green]done[/green]: {res.posts_found} found, "
+                    f"{res.posts_scraped} scraped"
+                )
+                conn.commit()
+        finally:
+            fetcher.close()
+
+
+@cli.command("serp")
+@click.option("--keyword", "-k", "keywords", multiple=True,
+              help="Keyword to check (repeatable). Default: top target terms.")
+@click.option("--limit", type=int, default=30, help="Max auto-selected terms")
+@click.option("--country", default="us")
+@click.option("--delay", type=float, default=4.0, help="Seconds between queries")
+@click.option("--show-browser", is_flag=True, help="Run Chromium non-headless")
+@click.pass_context
+def serp(ctx, keywords, limit, country, delay, show_browser):
+    """Scrape Google rankings for keywords (Playwright, best-effort)."""
+    s = _settings(ctx)
+    scraper = SerpScraper(country=country, delay=delay, headless=not show_browser)
+    try:
+        with db.connect(s.require_db()) as conn:
+            if keywords:
+                terms = [
+                    {"keyword_id": db.upsert_keyword(conn, k.strip().lower()),
+                     "term": k.strip().lower()}
+                    for k in keywords if k.strip()
+                ]
+            else:
+                terms = db.target_terms(conn, limit)
+            if not terms:
+                raise click.ClickException(
+                    "No keywords. Pass -k <keyword> or run `collect` first."
+                )
+            console.print(f"Checking {len(terms)} keyword(s) on Google ({country}) ...")
+            res = collect_serp(
+                conn, scraper, terms, country=country,
                 log=lambda m: console.print(m, style="dim"),
             )
+            if res.blocked:
+                console.print("[red]Blocked by Google (CAPTCHA).[/red] Try fewer "
+                              "keywords, a longer --delay, or --show-browser.")
             console.print(
-                f"  [green]done[/green]: {res.posts_found} found, "
-                f"{res.posts_scraped} scraped"
+                f"[green]done[/green]: {res.keywords_checked} keywords, "
+                f"{res.results_stored} results"
             )
-            conn.commit()
+    finally:
+        scraper.close()
 
 
 # --- reports -------------------------------------------------------------
@@ -188,8 +234,35 @@ def report_posts(ctx: click.Context, domain: str, limit: int) -> None:
     _render(
         f"{domain} — posts",
         rows,
-        ["primary_keyword", "word_count", "published_at", "title", "url"],
+        ["primary_keyword", "kw_count", "kw_density", "word_count",
+         "published_at", "title", "url"],
     )
+
+
+@report.command("density")
+@click.argument("domain")
+@click.argument("keyword")
+@click.option("--limit", type=int, default=50)
+@click.pass_context
+def report_density(ctx: click.Context, domain: str, keyword: str, limit: int) -> None:
+    """How many times a keyword is used in each of a domain's posts."""
+    s = _settings(ctx)
+    with db.connect(s.require_db()) as conn:
+        rows = reports.keyword_density(conn, domain, keyword, limit)
+    _render(f"{domain} — '{keyword}' density", rows,
+            ["count", "density", "word_count", "title", "url"])
+
+
+@report.command("post-keywords")
+@click.argument("url")
+@click.option("--limit", type=int, default=50)
+@click.pass_context
+def report_post_keywords(ctx: click.Context, url: str, limit: int) -> None:
+    """All target keywords of a single post with count and density."""
+    s = _settings(ctx)
+    with db.connect(s.require_db()) as conn:
+        rows = reports.post_keywords(conn, url, limit)
+    _render(f"Keywords in {url}", rows, ["term", "source", "count", "density"])
 
 
 @report.command("gaps")
@@ -214,6 +287,31 @@ def report_overlap(ctx: click.Context, domain: str, limit: int) -> None:
     with db.connect(s.require_db()) as conn:
         rows = reports.overlap(conn, domain, limit)
     _render(f"Shared targets vs {domain}", rows, ["term", "their_posts"])
+
+
+@report.command("rankings")
+@click.argument("domain")
+@click.option("--limit", type=int, default=100)
+@click.pass_context
+def report_rankings(ctx: click.Context, domain: str, limit: int) -> None:
+    """Keywords a domain ranks for on Google (latest position)."""
+    s = _settings(ctx)
+    with db.connect(s.require_db()) as conn:
+        rows = reports.rankings(conn, domain, limit)
+    _render(f"{domain} — Google rankings", rows,
+            ["keyword", "position", "url", "captured_at"])
+
+
+@report.command("serp")
+@click.argument("keyword")
+@click.option("--limit", type=int, default=20)
+@click.pass_context
+def report_serp(ctx: click.Context, keyword: str, limit: int) -> None:
+    """Full latest SERP for a keyword — who ranks where."""
+    s = _settings(ctx)
+    with db.connect(s.require_db()) as conn:
+        rows = reports.serp_keyword(conn, keyword, limit)
+    _render(f"SERP: {keyword}", rows, ["position", "domain", "tracked", "url", "title"])
 
 
 if __name__ == "__main__":

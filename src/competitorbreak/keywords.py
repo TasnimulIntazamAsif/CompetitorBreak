@@ -59,6 +59,21 @@ def _ngrams(tokens: list[str], n: int) -> list[str]:
     return out
 
 
+def count_occurrences(text: str, term: str) -> int:
+    """Count non-overlapping, case-insensitive occurrences of a word/phrase."""
+    if not text or not term:
+        return 0
+    pattern = r"\b" + r"\s+".join(re.escape(w) for w in term.split()) + r"\b"
+    return len(re.findall(pattern, text, flags=re.IGNORECASE))
+
+
+def density(count: int, word_count: int | None) -> float:
+    """Keyword density as a percentage of the post's word count."""
+    if not word_count:
+        return 0.0
+    return round(count / word_count * 100, 2)
+
+
 def slug_terms(url: str) -> list[str]:
     """Human-meaningful words from a URL's last path segment."""
     path = urlparse(url).path.rstrip("/")

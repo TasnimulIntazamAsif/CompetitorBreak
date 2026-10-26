@@ -11,3 +11,10 @@ dist/
 *.db
 *.sqlite
 *.sqlite3
+
+# Frontend (Node / Vite)
+node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts

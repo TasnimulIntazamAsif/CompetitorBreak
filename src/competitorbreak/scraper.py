@@ -48,16 +48,29 @@ class Post:
 
 
 class Fetcher:
-    """HTTP client with polite delay and optional robots.txt enforcement."""
+    """HTTP client with polite delay, robots.txt enforcement, and an optional
+    Playwright (headless Chromium) fallback for JavaScript-rendered pages."""
 
-    def __init__(self, delay: float = 1.0, respect_robots: bool = True, timeout: int = 20):
+    def __init__(
+        self,
+        delay: float = 1.0,
+        respect_robots: bool = True,
+        timeout: int = 20,
+        use_playwright: bool = True,
+        render_threshold: int = 120,
+    ):
         self.delay = delay
         self.respect_robots = respect_robots
         self.timeout = timeout
+        self.use_playwright = use_playwright
+        # Below this word count a page is assumed to be JS-rendered and re-fetched.
+        self.render_threshold = render_threshold
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT})
         self._robots: dict[str, RobotFileParser | None] = {}
         self._last_request = 0.0
+        self._pw = None
+        self._browser = None
 
     def _sleep(self) -> None:
         elapsed = time.monotonic() - self._last_request
@@ -70,10 +83,25 @@ class Fetcher:
         base = f"{parsed.scheme}://{parsed.netloc}"
         if base not in self._robots:
             rp = RobotFileParser()
-            rp.set_url(urljoin(base, "/robots.txt"))
             try:
-                rp.read()
-            except Exception:  # noqa: BLE001 - treat unreadable robots as "allow"
+                # Fetch robots.txt with our own session (and User-Agent) rather
+                # than RobotFileParser.read(), which uses urllib's default UA.
+                # CDN/WAF-fronted sites (e.g. Akamai) often 403 that default UA,
+                # which makes the parser silently disallow *everything* even when
+                # robots.txt actually permits us. Fetching via the session gets
+                # the real rules.
+                resp = self.session.get(
+                    urljoin(base, "/robots.txt"),
+                    timeout=self.timeout,
+                    headers={"Accept": "text/plain"},
+                )
+                if resp.status_code == 404:
+                    rp = None  # no robots.txt -> allow all
+                elif resp.status_code >= 400:
+                    rp.disallow_all = True  # forbidden/unavailable -> disallow
+                else:
+                    rp.parse(resp.text.splitlines())
+            except requests.RequestException:  # unreachable robots -> treat as "allow"
                 rp = None
             self._robots[base] = rp
         return self._robots[base]
@@ -99,6 +127,46 @@ class Fetcher:
         if resp.status_code >= 400:
             return None
         return resp
+
+    # --- Playwright fallback ---------------------------------------------
+
+    def _ensure_browser(self):
+        if self._browser is None:
+            from playwright.sync_api import sync_playwright  # lazy import
+
+            self._pw = sync_playwright().start()
+            self._browser = self._pw.chromium.launch(headless=True)
+        return self._browser
+
+    def render(self, url: str) -> str | None:
+        """Return fully rendered HTML via headless Chromium, or None on failure."""
+        if not self.allowed(url):
+            return None
+        self._sleep()
+        try:
+            browser = self._ensure_browser()
+            page = browser.new_page(user_agent=USER_AGENT)
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
+                page.wait_for_timeout(1500)  # give client-side JS time to render
+                return page.content()
+            finally:
+                page.close()
+        except Exception:
+            return None
+
+    def close(self) -> None:
+        """Shut down the Playwright browser if it was started."""
+        try:
+            if self._browser is not None:
+                self._browser.close()
+            if self._pw is not None:
+                self._pw.stop()
+        except Exception:
+            pass
+        finally:
+            self._browser = None
+            self._pw = None
 
 
 # --- discovery -----------------------------------------------------------
@@ -184,9 +252,16 @@ def discover_posts(
             for pat in blog_patterns:
                 index = urljoin(origin, pat)
                 break
-        resp = fetcher.get(index) if index else None
-        if resp is not None:
-            soup = BeautifulSoup(resp.text, "lxml")
+        html = None
+        if index:
+            resp = fetcher.get(index)
+            if resp is not None:
+                html = resp.text
+            # JS-rendered listing: retry with Playwright if few links came back.
+            if fetcher.use_playwright and (html is None or html.count("href") < 10):
+                html = fetcher.render(index) or html
+        if html:
+            soup = BeautifulSoup(html, "lxml")
             host = urlparse(origin).netloc
             for a in soup.find_all("a", href=True):
                 url = urljoin(origin, a["href"]).split("#")[0]
@@ -264,9 +339,19 @@ def parse_post(url: str, html: str) -> Post:
 
 
 def scrape_post(fetcher: Fetcher, url: str) -> Post | None:
+    """Fetch + parse a post. Falls back to Playwright rendering when the plain
+    HTTP response looks empty/JS-rendered (word count below the threshold)."""
+    post: Post | None = None
     resp = fetcher.get(url)
-    if resp is None:
-        return None
-    if "html" not in resp.headers.get("Content-Type", "").lower():
-        return None
-    return parse_post(url, resp.text)
+    if resp is not None and "html" in resp.headers.get("Content-Type", "").lower():
+        post = parse_post(url, resp.text)
+
+    thin = post is None or post.word_count < fetcher.render_threshold
+    if thin and fetcher.use_playwright:
+        rendered = fetcher.render(url)
+        if rendered:
+            rendered_post = parse_post(url, rendered)
+            # Keep whichever version has more content.
+            if post is None or rendered_post.word_count > post.word_count:
+                post = rendered_post
+    return post

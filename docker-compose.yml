@@ -1,0 +1,14 @@
+services:
+  web:
+    build: .
+    environment:
+      DB_PATH: /data/competitorbreak.db
+      PORT: "8000"
+    volumes:
+      - cbdata:/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+volumes:
+  cbdata:

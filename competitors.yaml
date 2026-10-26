@@ -12,9 +12,9 @@ self:
   name: iBOS
 
 competitors:
-  - domain: example-competitor.com
-    name: Example Competitor
-    # blog_url: https://example-competitor.com/sitemap.xml
+  - domain: bamboohr.com
+    name: BambooHR
+    blog_url: https://www.bamboohr.com/blog/sitemap.xml
   # - domain: another-rival.com
   #   name: Another Rival
 
