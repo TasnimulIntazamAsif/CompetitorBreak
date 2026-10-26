@@ -1,0 +1,30 @@
+# Competitor configuration for CompetitorBreak.
+#
+# `self` is your own domain (so gap/overlap reports compare against you).
+# `competitors` is the list of rival domains to scrape.
+# `blog_path_patterns` decides which URLs count as "blog" pages (substring match,
+# case-insensitive). Tune them if a competitor's blog lives under a different path.
+# Optionally set `blog_url:` on a competitor to point directly at their blog index
+# or sitemap when auto-discovery misses it.
+
+self:
+  domain: ibos.io
+  name: iBOS
+
+competitors:
+  - domain: example-competitor.com
+    name: Example Competitor
+    # blog_url: https://example-competitor.com/sitemap.xml
+  # - domain: another-rival.com
+  #   name: Another Rival
+
+blog_path_patterns:
+  - /blog/
+  - /blogs/
+  - /articles/
+  - /resources/
+  - /guides/
+  - /learn/
+  - /insights/
+  - /post/
+  - /posts/

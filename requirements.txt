@@ -1,0 +1,7 @@
+requests>=2.32
+beautifulsoup4>=4.12
+lxml>=5.2
+python-dotenv>=1.0
+PyYAML>=6.0
+click>=8.1
+rich>=13.7
