@@ -11,6 +11,7 @@ from .collector import collect_competitor, collect_serp
 from .config import Settings, load_settings
 from .scraper import Fetcher
 from .serp import SerpScraper
+from .dataforseo import DataForSEOSerp
 
 console = Console()
 
@@ -155,11 +156,23 @@ def collect(ctx: click.Context, domain: str | None, max_pages: int | None) -> No
 @click.option("--country", default="us")
 @click.option("--delay", type=float, default=4.0, help="Seconds between queries")
 @click.option("--show-browser", is_flag=True, help="Run Chromium non-headless")
+@click.option("--source", type=click.Choice(["playwright", "dataforseo"]),
+              default="playwright", help="Ranking source")
+@click.option("--sandbox", is_flag=True, help="DataForSEO sandbox (free dummy data)")
 @click.pass_context
-def serp(ctx, keywords, limit, country, delay, show_browser):
-    """Scrape Google rankings for keywords (Playwright, best-effort)."""
+def serp(ctx, keywords, limit, country, delay, show_browser, source, sandbox):
+    """Get Google rankings for keywords (Playwright scrape, or DataForSEO API)."""
     s = _settings(ctx)
-    scraper = SerpScraper(country=country, delay=delay, headless=not show_browser)
+    if source == "dataforseo":
+        auth = s.dataforseo_auth()
+        if not auth:
+            raise click.ClickException(
+                "DataForSEO credentials missing in .env "
+                "(DATAFORSEO_LOGIN/PASSWORD or DATAFORSEO_Base64_format)."
+            )
+        scraper = DataForSEOSerp(auth=auth, country=country, sandbox=sandbox)
+    else:
+        scraper = SerpScraper(country=country, delay=delay, headless=not show_browser)
     try:
         with db.connect(s.require_db()) as conn:
             if keywords:

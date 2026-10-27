@@ -35,6 +35,8 @@ export function SettingsPanel() {
       serp_max_results: s.serp_max_results,
       serp_limit: s.serp_limit,
       serp_headless: s.serp_headless,
+      serp_source: s.serp_source,
+      dataforseo_location: s.dataforseo_location,
     }
     try {
       await api.saveSettings(body)
@@ -82,6 +84,30 @@ export function SettingsPanel() {
         </div>
 
         <h3>SERP (rankings)</h3>
+        <div className="row">
+          <label>
+            Ranking source
+            <select value={s.serp_source} onChange={(e) => update('serp_source', e.target.value)}>
+              <option value="playwright">Playwright (Google scrape — free, gets blocked)</option>
+              <option value="dataforseo">DataForSEO API (reliable, no CAPTCHA)</option>
+            </select>
+          </label>
+          <label>
+            DataForSEO location
+            <input
+              value={s.dataforseo_location}
+              onChange={(e) => update('dataforseo_location', e.target.value)}
+              placeholder="United States"
+            />
+          </label>
+        </div>
+        {s.serp_source === 'dataforseo' && (
+          <p className="hint">
+            DataForSEO credentials live in <strong>.env</strong> (DATAFORSEO_LOGIN /
+            DATAFORSEO_PASSWORD or DATAFORSEO_Base64_format) — not here. Each live query bills a
+            small amount against your DataForSEO balance.
+          </p>
+        )}
         <div className="row">
           <label>
             Country (ISO code)

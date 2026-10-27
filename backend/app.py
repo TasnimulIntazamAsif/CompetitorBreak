@@ -25,6 +25,7 @@ from competitorbreak import config, db, reports  # noqa: E402
 from competitorbreak.collector import collect_competitor, collect_serp  # noqa: E402
 from competitorbreak.scraper import Fetcher  # noqa: E402
 from competitorbreak.serp import SerpScraper  # noqa: E402
+from competitorbreak.dataforseo import DataForSEOSerp  # noqa: E402
 
 SETTINGS = config.load_settings()
 DB_PATH = SETTINGS.require_db()
@@ -41,6 +42,8 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "serp_max_results": 10,    # results captured per keyword
     "serp_limit": 15,          # max keywords per auto SERP run
     "serp_headless": True,
+    "serp_source": "playwright",       # playwright | dataforseo
+    "dataforseo_location": "United States",
 }
 
 app = FastAPI(title="CompetitorBreak API", version="0.1.0")
@@ -105,6 +108,8 @@ class SettingsIn(BaseModel):
     serp_max_results: int | None = None
     serp_limit: int | None = None
     serp_headless: bool | None = None
+    serp_source: str | None = None
+    dataforseo_location: str | None = None
 
 
 class CollectIn(BaseModel):
@@ -311,15 +316,35 @@ def list_keywords(limit: int = 200):
 def _run_serp(keywords: list[str] | None, limit: int | None) -> None:
     cfg = _read_settings()
     country = str(cfg.get("country", "us"))
+    source = str(cfg.get("serp_source", "playwright"))
     if limit is None:
         limit = int(cfg.get("serp_limit", 15))
     try:
-        serp = SerpScraper(
-            country=country,
-            delay=float(cfg["serp_delay"]),
-            max_results=int(cfg["serp_max_results"]),
-            headless=bool(cfg["serp_headless"]),
-        )
+        if source == "dataforseo":
+            auth = SETTINGS.dataforseo_auth()
+            if not auth:
+                with db.connect(DB_PATH) as conn:
+                    rid = db.start_serp_run(conn, country)
+                    db.finish_serp_run(
+                        conn, rid, "error", 0,
+                        "DataForSEO credentials missing in .env "
+                        "(DATAFORSEO_LOGIN/PASSWORD or DATAFORSEO_Base64_format)",
+                    )
+                return
+            serp = DataForSEOSerp(
+                auth=auth,
+                country=country,
+                location=str(cfg.get("dataforseo_location", "United States")),
+                max_results=int(cfg["serp_max_results"]),
+                sandbox=SETTINGS.dataforseo_sandbox,
+            )
+        else:
+            serp = SerpScraper(
+                country=country,
+                delay=float(cfg["serp_delay"]),
+                max_results=int(cfg["serp_max_results"]),
+                headless=bool(cfg["serp_headless"]),
+            )
         try:
             with db.connect(DB_PATH) as conn:
                 if keywords:

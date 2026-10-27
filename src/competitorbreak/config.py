@@ -53,6 +53,19 @@ class Settings:
     self_name: str | None = None
     competitors: list[CompetitorEntry] = field(default_factory=list)
     blog_path_patterns: list[str] = field(default_factory=list)
+    # DataForSEO credentials (from .env; secrets stay out of the DB settings)
+    dataforseo_login: str | None = None
+    dataforseo_password: str | None = None
+    dataforseo_base64: str | None = None
+    dataforseo_sandbox: bool = False
+
+    def dataforseo_auth(self) -> str | None:
+        """Basic-auth base64 string, or None if no credentials are configured."""
+        from .dataforseo import make_auth
+
+        return make_auth(
+            self.dataforseo_login, self.dataforseo_password, self.dataforseo_base64
+        )
 
     def require_db(self) -> str:
         """Return the SQLite file path, ensuring its parent directory exists."""
@@ -89,4 +102,10 @@ def load_settings(yaml_path: Path | str | None = None) -> Settings:
         self_name=self_block.get("name"),
         competitors=competitors,
         blog_path_patterns=data.get("blog_path_patterns") or ["/blog/"],
+        dataforseo_login=os.getenv("DATAFORSEO_LOGIN") or None,
+        dataforseo_password=os.getenv("DATAFORSEO_PASSWORD") or None,
+        dataforseo_base64=os.getenv("DATAFORSEO_Base64_format")
+        or os.getenv("DATAFORSEO_BASE64")
+        or None,
+        dataforseo_sandbox=_env_bool("DATAFORSEO_SANDBOX", False),
     )

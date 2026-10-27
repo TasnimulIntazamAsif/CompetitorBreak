@@ -24,6 +24,8 @@ export interface Settings {
   serp_max_results: number
   serp_limit: number
   serp_headless: boolean
+  serp_source: string
+  dataforseo_location: string
 }
 
 export interface Run {

@@ -7,6 +7,10 @@ dist/
 .idea/
 # Secrets — do not commit real credentials
 .env
+# MCP server config (contains auth tokens)
+.mcp.json
+# Local Claude Code settings (machine-specific)
+.claude/settings.local.json
 # SQLite database files
 *.db
 *.sqlite
