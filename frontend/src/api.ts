@@ -1,6 +1,10 @@
 import type {
+  AnalyzeRow,
   Competitor,
   CompetitorInput,
+  CompetitorKeywordRow,
+  KeywordIndexRow,
+  ExportItem,
   Row,
   Run,
   SerpRun,
@@ -54,4 +58,70 @@ export const api = {
   serpRuns: () => req<SerpRun[]>('GET', '/api/serp/runs'),
 
   report: (path: string) => req<Row[]>('GET', path),
+
+  analyzeStart: (query: string, maxResults: number) =>
+    req<{ run_id: string }>('POST', '/api/analyze/start', { query, max_results: maxResults }),
+  analyzeStatus: (runId: string) =>
+    req<{ status: string; error: string | null; count: number }>(
+      'GET', `/api/analyze/status?run_id=${runId}`,
+    ),
+  analyzeResults: (runId: string) =>
+    req<{
+      status: string
+      error: string | null
+      results: AnalyzeRow[]
+      markdown: string | null
+      md_file: string | null
+    }>('GET', `/api/analyze/results?run_id=${runId}`),
+
+  ckwStart: (domain: string, maxKeywords: number) =>
+    req<{ run_id: string }>('POST', '/api/competitor-keywords/start', {
+      domain,
+      max_keywords: maxKeywords,
+    }),
+  ckwStatus: (runId: string) =>
+    req<{ status: string; error: string | null; count: number }>(
+      'GET', `/api/competitor-keywords/status?run_id=${runId}`,
+    ),
+  ckwResults: (runId: string) =>
+    req<{
+      status: string
+      error: string | null
+      results: CompetitorKeywordRow[]
+      markdown: string | null
+      md_file: string | null
+    }>('GET', `/api/competitor-keywords/results?run_id=${runId}`),
+
+  crawlStart: (domain: string, maxPages: number, maxKeywords: number, allPages: boolean) =>
+    req<{ run_id: string }>('POST', '/api/crawl-keywords/start', {
+      domain,
+      max_pages: maxPages,
+      max_keywords: maxKeywords,
+      all_pages: allPages,
+    }),
+  crawlStatus: (runId: string) =>
+    req<{ status: string; error: string | null; count: number }>(
+      'GET', `/api/crawl-keywords/status?run_id=${runId}`,
+    ),
+  crawlResults: (runId: string) =>
+    req<{
+      status: string
+      error: string | null
+      results: KeywordIndexRow[]
+      markdown: string | null
+      md_file: string | null
+    }>('GET', `/api/crawl-keywords/results?run_id=${runId}`),
+  crawlExportUrl: (runId: string, fmt: 'csv' | 'xlsx' | 'docx' | 'pdf') =>
+    `${BASE}/api/crawl-keywords/export?run_id=${encodeURIComponent(runId)}&fmt=${fmt}`,
+
+  askStart: (query: string) => req<{ run_id: string }>('POST', '/api/ask/start', { query }),
+  askStatus: (runId: string) =>
+    req<{ status: string; error: string | null; md_file: string | null }>(
+      'GET', `/api/ask/status?run_id=${runId}`,
+    ),
+  listExports: () => req<ExportItem[]>('GET', '/api/exports'),
+  getExport: (name: string) =>
+    req<{ name: string; content: string }>('GET', `/api/exports/${encodeURIComponent(name)}`),
+  deleteExport: (name: string) =>
+    req<unknown>('DELETE', `/api/exports/${encodeURIComponent(name)}`),
 }

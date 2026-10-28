@@ -244,6 +244,84 @@ td.num, th.num { text-align: right; }
 .hidden { display: none !important; }
 .empty { color: var(--muted); padding: 16px 0; font-size: 14px; }
 
+.analyze-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rank-badge {
+  display: inline-grid; place-items: center;
+  min-width: 30px; height: 26px; padding: 0 8px;
+  border-radius: 6px; background: var(--primary); color: #fff;
+  font-weight: 600; font-size: 13px;
+}
+.analyze-domain { color: var(--text); font-weight: 600; text-decoration: none; }
+.analyze-domain:hover { color: var(--primary); text-decoration: underline; }
+.analyze-title { margin-top: 6px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.chip {
+  font-size: 12px; padding: 4px 9px; border-radius: 20px;
+  background: var(--hover); border: 1px solid var(--border); color: var(--muted);
+}
+.chip b { color: var(--text); }
+
+.check-label {
+  flex-direction: row !important; align-items: center; gap: 8px;
+  white-space: nowrap; font-size: 13px; color: var(--muted);
+}
+.check-label input { width: auto; }
+
+/* download links styled as buttons */
+.btn-link {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 7px 12px; border-radius: 7px; font-size: 13px; font-weight: 500;
+  background: var(--hover); color: var(--text); border: 1px solid var(--border);
+  text-decoration: none; cursor: pointer;
+}
+.btn-link:hover { border-color: var(--primary); color: var(--primary); }
+
+/* ---- Competitor keywords table ---- */
+.ckw-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.ckw-table th, .ckw-table td {
+  text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.ckw-table th { color: var(--muted); font-weight: 600; font-size: 12px; }
+.ckw-table th.num, .ckw-table td.num { text-align: right; white-space: nowrap; }
+.ckw-table tbody tr:hover { background: var(--hover); }
+.ckw-table .kw-cell { font-weight: 600; vertical-align: top; border-right: 1px solid var(--border); }
+.ckw-url { max-width: 420px; word-break: break-all; }
+.ckw-url a { color: var(--primary); text-decoration: none; }
+.ckw-url a:hover { text-decoration: underline; }
+
+/* ---- Analyze: our own site (ibos.io) comparison ---- */
+.self-compare {
+  border-left: 4px solid var(--primary);
+  background: var(--primary-bg, var(--hover));
+  margin-bottom: 16px;
+}
+.self-row { border: 1px solid var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.badge.self-badge { background: var(--primary); color: #fff; }
+
+.store-grid { display: grid; grid-template-columns: 300px 1fr; gap: 16px; align-items: start; }
+.store-list { padding: 12px; }
+.store-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 6px; border-radius: 6px; border-bottom: 1px solid var(--border);
+}
+.store-item:last-child { border-bottom: none; }
+.store-item.active { background: var(--primary-tint); }
+.store-item .hint { font-size: 11px; white-space: nowrap; }
+.store-name {
+  flex: 1; min-width: 0; text-align: left; background: none; border: none;
+  color: var(--text); cursor: pointer; font-size: 13px; padding: 2px 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: inherit;
+}
+.store-name:hover { color: var(--primary); }
+.md-view {
+  margin: 12px 0 0; padding: 14px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 8px;
+  font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  max-height: 70vh; overflow: auto; font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+@media (max-width: 860px) { .store-grid { grid-template-columns: 1fr; } }
+
 .warn-text {
   margin: 0 0 16px;
   padding: 11px 13px;

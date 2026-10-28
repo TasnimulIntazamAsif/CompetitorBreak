@@ -12,6 +12,9 @@ from .config import Settings, load_settings
 from .scraper import Fetcher
 from .serp import SerpScraper
 from .dataforseo import DataForSEOSerp
+from .llm_search import LLMSearch, ClaudeCLISearch
+from .analyze import analyze_query, to_markdown
+from . import competitor_keywords as ckw
 
 console = Console()
 
@@ -44,15 +47,82 @@ def init_db(ctx: click.Context) -> None:
 @cli.command("check")
 @click.pass_context
 def check(ctx: click.Context) -> None:
-    """Verify the SQLite database is reachable."""
+    """Verify the configured database is reachable."""
     s = _settings(ctx)
-    path = s.require_db()
+    target = s.require_db()
+    kind = "Postgres" if s.is_postgres else "SQLite"
     try:
-        with db.connect(path) as conn:
+        with db.connect(target) as conn:
             conn.execute("SELECT 1")
-        console.print(f"[green]SQLite: OK[/green] - {path}")
+        shown = target.split("@")[-1] if s.is_postgres else target
+        console.print(f"[green]{kind}: OK[/green] - {shown}")
     except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]SQLite: FAILED[/red] - {exc}")
+        console.print(f"[red]{kind}: FAILED[/red] - {exc}")
+
+
+@cli.command("migrate-to-pg")
+@click.option("--from", "src_path", default=None,
+              help="Source SQLite file (default: DB_PATH / competitorbreak.db)")
+@click.pass_context
+def migrate_to_pg(ctx: click.Context, src_path: str | None) -> None:
+    """Copy all data from the SQLite file into the configured PostgreSQL database.
+
+    Target Postgres must be configured in .env (PGHOST/… or DATABASE_URL). The
+    target tables are cleared first, rows are copied preserving ids, then the id
+    sequences are advanced so new inserts don't collide."""
+    import os
+    import sqlite3
+    from pathlib import Path
+    from .config import ROOT
+
+    s = _settings(ctx)
+    if not s.is_postgres:
+        raise click.ClickException(
+            "No Postgres target configured. Set PGHOST/PGUSER/… or DATABASE_URL in .env."
+        )
+
+    src = src_path or os.getenv("DB_PATH") or "competitorbreak.db"
+    src_file = Path(src)
+    if not src_file.is_absolute():
+        src_file = ROOT / src_file
+    if not src_file.exists():
+        raise click.ClickException(f"SQLite file not found: {src_file}")
+
+    # Parent-before-child so foreign keys resolve.
+    order = ["competitors", "keywords", "pages", "page_keywords",
+             "runs", "serp_runs", "serp_results", "settings"]
+    id_tables = [t for t in order if t != "settings"]
+
+    srccon = sqlite3.connect(str(src_file))
+    srccon.row_factory = sqlite3.Row
+    try:
+        with db.connect(s.require_db()) as pg:
+            pg.execute(
+                "TRUNCATE " + ", ".join(order) + " RESTART IDENTITY CASCADE"
+            )
+            total = 0
+            for table in order:
+                cur = srccon.execute(f"SELECT * FROM {table}")
+                cols = [d[0] for d in cur.description]
+                collist = ", ".join(cols)
+                placeholders = ", ".join("?" for _ in cols)
+                rows = cur.fetchall()
+                for row in rows:
+                    pg.execute(
+                        f"INSERT INTO {table} ({collist}) VALUES ({placeholders})",
+                        [row[c] for c in cols],
+                    )
+                console.print(f"  {table}: {len(rows)} rows", style="dim")
+                total += len(rows)
+            # Advance each id sequence past the copied maximum id.
+            for table in id_tables:
+                pg.execute(
+                    f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
+                    f"COALESCE((SELECT MAX(id) FROM {table}), 1))"
+                )
+        console.print(f"[green]Migrated {total} rows into Postgres.[/green]")
+    finally:
+        srccon.close()
 
 
 @cli.command("sync-config")
@@ -204,6 +274,260 @@ def serp(ctx, keywords, limit, country, delay, show_browser, source, sandbox):
 
 
 # --- reports -------------------------------------------------------------
+
+@cli.command("analyze")
+@click.argument("query")
+@click.option("--max-results", type=int, default=5)
+@click.option("--source", type=click.Choice(["claude-cli", "anthropic"]),
+              default="claude-cli", help="LLM source")
+@click.option("--model", default="claude-haiku-5-5")
+@click.option("--out", "out_path", default=None, help="Write a Markdown report to this path")
+@click.pass_context
+def analyze_cmd(ctx, query, max_results, source, model, out_path):
+    """LLM web-search ranking for a query + each ranked page's on-page keywords."""
+    s = _settings(ctx)
+    # Our own site, for the rank comparison — the competitor marked is_self.
+    self_domain = None
+    try:
+        with db.connect(s.require_db()) as conn:
+            row = conn.execute(
+                "SELECT domain FROM competitors WHERE is_self = 1 LIMIT 1"
+            ).fetchone()
+            if row:
+                self_domain = row["domain"]
+    except Exception:  # noqa: BLE001 - comparison is best-effort
+        self_domain = None
+    if source == "claude-cli":
+        llm = ClaudeCLISearch(model=model, max_results=max_results, self_domain=self_domain)
+    else:
+        if not s.anthropic_api_key:
+            raise click.ClickException("ANTHROPIC_API_KEY is not set in .env.")
+        llm = LLMSearch(
+            api_key=s.anthropic_api_key, model=model, max_results=max_results,
+            self_domain=self_domain,
+        )
+    fetcher = Fetcher(delay=0.5, respect_robots=s.respect_robots, use_playwright=False)
+    try:
+        rows = analyze_query(
+            llm, fetcher, query, max_results=max_results, self_domain=self_domain,
+            log=lambda m: console.print(m, style="dim"),
+        )
+        import datetime as _dt
+        import pathlib as _pl
+        import re as _re
+        from .config import ROOT
+        if out_path:
+            path = _pl.Path(out_path)
+        else:
+            slug = _re.sub(r"[^a-z0-9]+", "-", query.lower()).strip("-")[:50] or "query"
+            ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            exports = ROOT / "exports"
+            exports.mkdir(parents=True, exist_ok=True)
+            path = exports / f"analyze-{slug}-{ts}.md"
+        path.write_text(to_markdown(query, rows, source=source), encoding="utf-8")
+        console.print(f"[green]Saved:[/green] {path}")
+        for r in rows:
+            tag = " [cyan](us)[/cyan]" if r.get("is_self") else ""
+            console.print(
+                f"[bold]Position {r['position']}/100[/bold] {r['domain']}{tag} "
+                f"[dim]— {r.get('primary_keyword') or ''}[/dim]"
+            )
+            console.print(f"    {r['url']}", style="dim")
+            kws = ", ".join(
+                f"{k['term']} ({k['count']})" for k in r["keywords"][:6]
+            )
+            if kws:
+                console.print(f"    keywords: {kws}", style="dim")
+    finally:
+        llm.close()
+        fetcher.close()
+
+
+@cli.command("competitor-keywords")
+@click.argument("domain")
+@click.option("--max-keywords", type=int, default=15,
+              help="How many ranking keywords to return")
+@click.option("--model", default="claude-haiku-5-5")
+@click.option("--out", "out_path", default=None, help="Write a Markdown report to this path")
+@click.pass_context
+def competitor_keywords_cmd(ctx, domain, max_keywords, model, out_path):
+    """Ask claude (web search) which keywords DOMAIN ranks for and which page
+    ranks for each. Output: keyword -> approx position -> ranking page + URL."""
+    s = _settings(ctx)
+    llm = ClaudeCLISearch(model=model)
+    # Playwright (headless browser) renders JS and gets past many bot-blocks that
+    # return nothing to plain requests (e.g. ibos.io), so density can be computed.
+    fetcher = Fetcher(delay=0.5, respect_robots=s.respect_robots, use_playwright=True)
+    try:
+        rows = ckw.reverse_keywords(
+            llm, domain, max_keywords=max_keywords, fetcher=fetcher,
+            log=lambda m: console.print(m, style="dim"),
+        )
+        import datetime as _dt
+        import pathlib as _pl
+        import re as _re
+        from .config import ROOT
+        if out_path:
+            path = _pl.Path(out_path)
+        else:
+            slug = _re.sub(r"[^a-z0-9]+", "-", domain.lower()).strip("-")[:50] or "domain"
+            ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            exports = ROOT / "exports"
+            exports.mkdir(parents=True, exist_ok=True)
+            path = exports / f"competitor-keywords-{slug}-{ts}.md"
+        path.write_text(ckw.to_markdown(domain, rows, source="claude-cli"), encoding="utf-8")
+        console.print(f"[green]Saved:[/green] {path} ({len(rows)} keywords)")
+        for r in rows:
+            pos = f"{r['position']}/100" if r["position"] is not None else "?"
+            dens = (
+                f" [magenta]{r['kw_count']}× · {r['kw_density']}%[/magenta]"
+                if r.get("kw_count") is not None else ""
+            )
+            console.print(
+                f"[bold]Position {pos}[/bold] {r['keyword']} "
+                f"[cyan]({r['page_type'] or '—'})[/cyan]{dens}"
+            )
+            if r["url"]:
+                console.print(f"    {r['url']}", style="dim")
+    finally:
+        llm.close()
+        fetcher.close()
+
+
+@cli.command("crawl-keywords")
+@click.argument("domain")
+@click.option("--all", "all_pages", is_flag=True,
+              help="Crawl EVERY page in the sitemap, not just blog/content pages")
+@click.option("--max-pages", type=int, default=15,
+              help="Max pages to crawl (raise this with --all)")
+@click.option("--max-keywords", type=int, default=10, help="Top keywords per page")
+@click.option("--out", "out_path", default=None, help="Write a Markdown report to this path")
+@click.pass_context
+def crawl_keywords_cmd(ctx, domain, all_pages, max_pages, max_keywords, out_path):
+    """Crawl DOMAIN's own pages and report, per page, the keywords it is densest
+    in (what each page targets) + the page URL. No LLM, no rank data — reliable."""
+    s = _settings(ctx)
+    fetcher = Fetcher(delay=0.5, respect_robots=s.respect_robots, use_playwright=True)
+    try:
+        rows = ckw.crawl_keyword_index(
+            fetcher, domain, blog_patterns=s.blog_path_patterns,
+            max_pages=max_pages, all_pages=all_pages,
+            log=lambda m: console.print(m, style="dim"),
+        )
+        import datetime as _dt
+        import pathlib as _pl
+        import re as _re
+        from .config import ROOT
+        if out_path:
+            path = _pl.Path(out_path)
+        else:
+            slug = _re.sub(r"[^a-z0-9]+", "-", domain.lower()).strip("-")[:50] or "domain"
+            ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            exports = ROOT / "exports"
+            exports.mkdir(parents=True, exist_ok=True)
+            path = exports / f"crawl-keywords-{slug}-{ts}.md"
+        path.write_text(ckw.index_to_markdown(domain, rows), encoding="utf-8")
+        console.print(f"[green]Saved:[/green] {path} ({len(rows)} keywords)")
+        for r in rows[:40]:
+            console.print(f"[bold]{r['keyword']}[/bold] [dim]— {r['total']}× on {r['pages']} page(s)[/dim]")
+            for u in r["urls"][:5]:
+                console.print(f"    {u['count']}×  {u['url']}", style="dim")
+    finally:
+        fetcher.close()
+
+
+@cli.command("rank-check")
+@click.argument("keywords", nargs=-1, required=True)
+@click.option("--competitor", "competitor", default=None,
+              help="A competitor domain to track alongside your own site")
+@click.option("--model", default="claude-haiku-5-5")
+@click.option("--out", "out_path", default=None, help="Write a Markdown report to this path")
+@click.pass_context
+def rank_check_cmd(ctx, keywords, competitor, model, out_path):
+    """Check where YOUR site and a competitor rank for keywords YOU supply.
+
+    Example: cb.py rank-check "hr software bangladesh" "payroll software" --competitor bamboohr.com
+    """
+    s = _settings(ctx)
+    # Your own site = the competitor marked is_self in the DB.
+    self_domain = None
+    with db.connect(s.require_db()) as conn:
+        row = conn.execute(
+            "SELECT domain FROM competitors WHERE is_self = 1 LIMIT 1"
+        ).fetchone()
+        if row:
+            self_domain = row["domain"]
+    track = [d for d in (self_domain, competitor) if d]
+    if not track:
+        raise click.ClickException(
+            "No domains to track. Mark your site with `add-competitor <domain> --self`, "
+            "or pass --competitor <domain>."
+        )
+
+    llm = ClaudeCLISearch(model=model, self_domain=track)
+    try:
+        rows = ckw.rank_keywords(
+            llm, list(keywords), track_domains=track,
+            log=lambda m: console.print(m, style="dim"),
+        )
+        import datetime as _dt
+        import pathlib as _pl
+        import re as _re
+        from .config import ROOT
+        if out_path:
+            path = _pl.Path(out_path)
+        else:
+            ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            exports = ROOT / "exports"
+            exports.mkdir(parents=True, exist_ok=True)
+            path = exports / f"rank-check-{ts}.md"
+        path.write_text(ckw.ranks_to_markdown(rows, track), encoding="utf-8")
+        console.print(f"[green]Saved:[/green] {path}")
+        for row in rows:
+            console.print(f"[bold]{row['keyword']}[/bold]")
+            for d in track:
+                info = row["ranks"].get(d)
+                tag = " [cyan](you)[/cyan]" if d == self_domain else ""
+                if info:
+                    console.print(
+                        f"    {d}{tag}: [bold]#{info['position']}/100[/bold] "
+                        f"({info['page_type']}) {info['url']}", style="dim"
+                    )
+                else:
+                    console.print(f"    {d}{tag}: not found in top results", style="dim")
+    finally:
+        llm.close()
+
+
+@cli.command("ask")
+@click.argument("query")
+@click.option("--out", "out_path", default=None, help="Output .md path")
+@click.pass_context
+def ask_cmd(ctx, query, out_path):
+    """Free-form Claude web-search query; save the answer to exports/<name>.md."""
+    import datetime
+    import pathlib
+    import re as _re
+    from .config import ROOT
+
+    llm = ClaudeCLISearch()
+    console.print("Asking Claude (web search) ...", style="dim")
+    text = llm.raw(query)
+
+    if out_path:
+        path = pathlib.Path(out_path)
+    else:
+        slug = _re.sub(r"[^a-z0-9]+", "-", query.lower()).strip("-")[:50] or "query"
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        exports = ROOT / "exports"
+        exports.mkdir(parents=True, exist_ok=True)
+        path = exports / f"{slug}-{ts}.md"
+
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    path.write_text(f"# {query}\n\n_{now}_\n\n{text}\n", encoding="utf-8")
+    console.print(f"[green]Saved:[/green] {path}")
+    console.print(text)
+
 
 @cli.group()
 def report() -> None:

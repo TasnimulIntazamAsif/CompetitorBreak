@@ -7,16 +7,20 @@ SQLite DB so it can be managed entirely from the frontend.
 
 from __future__ import annotations
 
+import datetime
 import json
 import pathlib
+import re
 import sys
 import threading
+import uuid
 
 # Make the core package importable (src/ layout).
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi.responses import Response  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -26,6 +30,10 @@ from competitorbreak.collector import collect_competitor, collect_serp  # noqa: 
 from competitorbreak.scraper import Fetcher  # noqa: E402
 from competitorbreak.serp import SerpScraper  # noqa: E402
 from competitorbreak.dataforseo import DataForSEOSerp  # noqa: E402
+from competitorbreak.llm_search import LLMSearch, ClaudeCLISearch  # noqa: E402
+from competitorbreak.analyze import analyze_query, to_markdown  # noqa: E402
+from competitorbreak import competitor_keywords as ckw  # noqa: E402
+from competitorbreak import exporters  # noqa: E402
 
 SETTINGS = config.load_settings()
 DB_PATH = SETTINGS.require_db()
@@ -44,6 +52,8 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "serp_headless": True,
     "serp_source": "playwright",       # playwright | dataforseo
     "dataforseo_location": "United States",
+    "llm_source": "claude_cli",        # claude_cli | anthropic
+    "llm_model": "claude-haiku-5-5",   # model for query analysis (fast + light)
 }
 
 app = FastAPI(title="CompetitorBreak API", version="0.1.0")
@@ -110,6 +120,8 @@ class SettingsIn(BaseModel):
     serp_headless: bool | None = None
     serp_source: str | None = None
     dataforseo_location: str | None = None
+    llm_source: str | None = None
+    llm_model: str | None = None
 
 
 class CollectIn(BaseModel):
@@ -119,6 +131,11 @@ class CollectIn(BaseModel):
 class SerpIn(BaseModel):
     keywords: list[str] | None = None  # None = auto (top target terms)
     limit: int | None = None           # cap when auto-selecting terms; None = settings default
+
+
+class AnalyzeIn(BaseModel):
+    query: str
+    max_results: int = 5
 
 
 # --- competitors ---------------------------------------------------------
@@ -376,6 +393,393 @@ def start_serp(body: SerpIn):
 @app.get("/api/serp/status")
 def serp_status():
     return {"running": _serp_lock.locked()}
+
+
+# --- query analysis (background: LLM web search can take a minute) ----------
+
+_analyze_jobs: dict[str, dict] = {}
+_analyze_lock = threading.Lock()
+EXPORTS = ROOT / "exports"
+
+
+def _run_analyze(run_id: str, query: str, n: int) -> None:
+    job = _analyze_jobs[run_id]
+    cfg = _read_settings()
+    source = str(cfg.get("llm_source", "claude_cli"))
+    model = str(cfg.get("llm_model", "claude-haiku-5-5"))
+    # Our own site, for the rank comparison — the competitor marked is_self.
+    self_domain = None
+    try:
+        with db.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT domain FROM competitors WHERE is_self = 1 LIMIT 1"
+            ).fetchone()
+            if row:
+                self_domain = row["domain"]
+    except Exception:  # noqa: BLE001 - comparison is best-effort
+        self_domain = None
+    try:
+        if source == "dataforseo":
+            auth = SETTINGS.dataforseo_auth()
+            if not auth:
+                raise RuntimeError("DataForSEO credentials are not set in .env.")
+            llm = DataForSEOSerp(
+                auth=auth,
+                country=str(cfg.get("country", "us")),
+                location=str(cfg.get("dataforseo_location", "United States")),
+                max_results=n,
+                sandbox=SETTINGS.dataforseo_sandbox,
+            )
+        elif source == "claude_cli":
+            llm = ClaudeCLISearch(model=model, max_results=n, self_domain=self_domain)
+        else:
+            key = SETTINGS.anthropic_api_key
+            if not key:
+                raise RuntimeError("ANTHROPIC_API_KEY is not set in .env.")
+            llm = LLMSearch(api_key=key, model=model, max_results=n, self_domain=self_domain)
+        fetcher = Fetcher(
+            delay=0.5, respect_robots=bool(cfg["respect_robots"]), use_playwright=False
+        )
+        try:
+            rows = analyze_query(llm, fetcher, query, max_results=n, self_domain=self_domain)
+        finally:
+            llm.close()
+            fetcher.close()
+
+        md = to_markdown(query, rows, source=source)
+        md_file = None
+        try:
+            EXPORTS.mkdir(parents=True, exist_ok=True)
+            slug = re.sub(r"[^a-z0-9]+", "-", query.lower()).strip("-")[:40] or "query"
+            md_file = f"analyze-{slug}-{run_id[:8]}.md"
+            (EXPORTS / md_file).write_text(md, encoding="utf-8")
+        except Exception:  # noqa: BLE001 - file write is best-effort
+            md_file = None
+
+        job.update(status="success", results=rows, markdown=md, md_file=md_file)
+    except Exception as exc:  # noqa: BLE001
+        job.update(status="error", error=str(exc))
+    finally:
+        _analyze_lock.release()
+
+
+@app.post("/api/analyze/start")
+def analyze_start(body: AnalyzeIn):
+    cfg = _read_settings()
+    if str(cfg.get("llm_source", "claude_cli")) == "anthropic" and not SETTINGS.anthropic_api_key:
+        raise HTTPException(400, "ANTHROPIC_API_KEY is not set in .env.")
+    if not _analyze_lock.acquire(blocking=False):
+        raise HTTPException(409, "An analysis is already running.")
+    n = max(1, min(body.max_results, 10))
+    run_id = uuid.uuid4().hex
+    _analyze_jobs[run_id] = {
+        "status": "running", "query": body.query, "results": None,
+        "error": None, "markdown": None, "md_file": None,
+    }
+    threading.Thread(target=_run_analyze, args=(run_id, body.query, n), daemon=True).start()
+    return {"run_id": run_id}
+
+
+@app.get("/api/analyze/status")
+def analyze_status(run_id: str):
+    job = _analyze_jobs.get(run_id)
+    if not job:
+        raise HTTPException(404, "Unknown analysis run.")
+    return {"status": job["status"], "error": job["error"],
+            "count": len(job["results"] or [])}
+
+
+@app.get("/api/analyze/results")
+def analyze_results(run_id: str):
+    job = _analyze_jobs.get(run_id)
+    if not job:
+        raise HTTPException(404, "Unknown analysis run.")
+    return {
+        "status": job["status"], "error": job["error"],
+        "results": job["results"] or [],
+        "markdown": job["markdown"], "md_file": job["md_file"],
+    }
+
+
+# --- competitor keywords (domain -> ranking keywords, via claude web search) --
+
+_ckw_jobs: dict[str, dict] = {}
+_ckw_lock = threading.Lock()
+
+
+def _run_competitor_keywords(run_id: str, domain: str, n: int) -> None:
+    job = _ckw_jobs[run_id]
+    cfg = _read_settings()
+    model = str(cfg.get("llm_model", "claude-haiku-5-5"))
+    try:
+        llm = ClaudeCLISearch(model=model)
+        # Playwright renders JS / gets past bot-blocks so density can be computed.
+        fetcher = Fetcher(
+            delay=0.5, respect_robots=bool(cfg["respect_robots"]), use_playwright=True
+        )
+        try:
+            rows = ckw.reverse_keywords(llm, domain, max_keywords=n, fetcher=fetcher)
+        finally:
+            llm.close()
+            fetcher.close()
+
+        md = ckw.to_markdown(domain, rows, source="claude-cli")
+        md_file = None
+        try:
+            EXPORTS.mkdir(parents=True, exist_ok=True)
+            slug = re.sub(r"[^a-z0-9]+", "-", domain.lower()).strip("-")[:40] or "domain"
+            md_file = f"competitor-keywords-{slug}-{run_id[:8]}.md"
+            (EXPORTS / md_file).write_text(md, encoding="utf-8")
+        except Exception:  # noqa: BLE001 - file write is best-effort
+            md_file = None
+
+        job.update(status="success", results=rows, markdown=md, md_file=md_file)
+    except Exception as exc:  # noqa: BLE001
+        job.update(status="error", error=str(exc))
+    finally:
+        _ckw_lock.release()
+
+
+class CompetitorKeywordsIn(BaseModel):
+    domain: str
+    max_keywords: int = 15
+
+
+@app.post("/api/competitor-keywords/start")
+def competitor_keywords_start(body: CompetitorKeywordsIn):
+    if not body.domain.strip():
+        raise HTTPException(400, "Enter a domain.")
+    if not _ckw_lock.acquire(blocking=False):
+        raise HTTPException(409, "A keyword check is already running.")
+    n = max(1, min(body.max_keywords, 30))
+    run_id = uuid.uuid4().hex
+    _ckw_jobs[run_id] = {
+        "status": "running", "domain": body.domain, "results": None,
+        "error": None, "markdown": None, "md_file": None,
+    }
+    threading.Thread(
+        target=_run_competitor_keywords, args=(run_id, body.domain.strip(), n), daemon=True
+    ).start()
+    return {"run_id": run_id}
+
+
+@app.get("/api/competitor-keywords/status")
+def competitor_keywords_status(run_id: str):
+    job = _ckw_jobs.get(run_id)
+    if not job:
+        raise HTTPException(404, "Unknown run.")
+    return {"status": job["status"], "error": job["error"],
+            "count": len(job["results"] or [])}
+
+
+@app.get("/api/competitor-keywords/results")
+def competitor_keywords_results(run_id: str):
+    job = _ckw_jobs.get(run_id)
+    if not job:
+        raise HTTPException(404, "Unknown run.")
+    return {
+        "status": job["status"], "error": job["error"],
+        "results": job["results"] or [],
+        "markdown": job["markdown"], "md_file": job["md_file"],
+    }
+
+
+# --- site crawl (domain -> per-page keyword density, no LLM) --------------
+
+_crawl_jobs: dict[str, dict] = {}
+_crawl_lock = threading.Lock()
+
+
+def _run_crawl_keywords(
+    run_id: str, domain: str, max_pages: int, n: int, all_pages: bool
+) -> None:
+    job = _crawl_jobs[run_id]
+    cfg = _read_settings()
+    try:
+        fetcher = Fetcher(
+            delay=0.5, respect_robots=bool(cfg["respect_robots"]), use_playwright=True
+        )
+        try:
+            rows = ckw.crawl_keyword_index(
+                fetcher, domain,
+                blog_patterns=list(cfg.get("blog_path_patterns") or SETTINGS.blog_path_patterns),
+                max_pages=max_pages, all_pages=all_pages,
+            )
+        finally:
+            fetcher.close()
+
+        md = ckw.index_to_markdown(domain, rows)
+        md_file = None
+        try:
+            EXPORTS.mkdir(parents=True, exist_ok=True)
+            slug = re.sub(r"[^a-z0-9]+", "-", domain.lower()).strip("-")[:40] or "domain"
+            md_file = f"crawl-keywords-{slug}-{run_id[:8]}.md"
+            (EXPORTS / md_file).write_text(md, encoding="utf-8")
+        except Exception:  # noqa: BLE001 - file write is best-effort
+            md_file = None
+
+        job.update(status="success", results=rows, markdown=md, md_file=md_file)
+    except Exception as exc:  # noqa: BLE001
+        job.update(status="error", error=str(exc))
+    finally:
+        _crawl_lock.release()
+
+
+class CrawlKeywordsIn(BaseModel):
+    domain: str
+    max_pages: int = 15
+    max_keywords: int = 10
+    all_pages: bool = False
+
+
+@app.post("/api/crawl-keywords/start")
+def crawl_keywords_start(body: CrawlKeywordsIn):
+    if not body.domain.strip():
+        raise HTTPException(400, "Enter a domain.")
+    if not _crawl_lock.acquire(blocking=False):
+        raise HTTPException(409, "A crawl is already running.")
+    # Whole-site crawls can be large, so allow a much higher cap with --all.
+    cap = 2000 if body.all_pages else 40
+    pages_n = max(1, min(body.max_pages, cap))
+    n = max(1, min(body.max_keywords, 20))
+    run_id = uuid.uuid4().hex
+    _crawl_jobs[run_id] = {
+        "status": "running", "domain": body.domain, "results": None,
+        "error": None, "markdown": None, "md_file": None,
+    }
+    threading.Thread(
+        target=_run_crawl_keywords,
+        args=(run_id, body.domain.strip(), pages_n, n, body.all_pages), daemon=True
+    ).start()
+    return {"run_id": run_id}
+
+
+@app.get("/api/crawl-keywords/status")
+def crawl_keywords_status(run_id: str):
+    job = _crawl_jobs.get(run_id)
+    if not job:
+        raise HTTPException(404, "Unknown run.")
+    return {"status": job["status"], "error": job["error"],
+            "count": len(job["results"] or [])}
+
+
+@app.get("/api/crawl-keywords/results")
+def crawl_keywords_results(run_id: str):
+    job = _crawl_jobs.get(run_id)
+    if not job:
+        raise HTTPException(404, "Unknown run.")
+    return {
+        "status": job["status"], "error": job["error"],
+        "results": job["results"] or [],
+        "markdown": job["markdown"], "md_file": job["md_file"],
+    }
+
+
+@app.get("/api/crawl-keywords/export")
+def crawl_keywords_export(run_id: str, fmt: str):
+    job = _crawl_jobs.get(run_id)
+    if not job:
+        raise HTTPException(404, "Unknown run.")
+    if job["status"] != "success":
+        raise HTTPException(409, "This run has no completed result yet.")
+    fmt = fmt.lower()
+    gen = exporters.GENERATORS.get(fmt)
+    if gen is None:
+        raise HTTPException(400, "Unsupported format. Use csv, xlsx, docx or pdf.")
+    domain = job["domain"]
+    data = gen(domain, job["results"] or [])
+    slug = re.sub(r"[^a-z0-9]+", "-", domain.lower()).strip("-")[:40] or "domain"
+    fname = f"keyword-index-{slug}.{fmt}"
+    return Response(
+        content=data, media_type=exporters.MEDIA_TYPES[fmt],
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+# --- free-form ask (Claude web search) + the exports store --------------
+
+_ask_jobs: dict[str, dict] = {}
+_ask_lock = threading.Lock()
+
+
+def _save_export(title: str, body: str) -> str:
+    EXPORTS.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50] or "query"
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    name = f"{slug}-{ts}.md"
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    (EXPORTS / name).write_text(f"# {title}\n\n_{now}_\n\n{body}\n", encoding="utf-8")
+    return name
+
+
+def _run_ask(run_id: str, query: str) -> None:
+    job = _ask_jobs[run_id]
+    try:
+        llm = ClaudeCLISearch()
+        text = llm.raw(query)
+        name = _save_export(query, text)
+        job.update(status="success", md_file=name, markdown=text)
+    except Exception as exc:  # noqa: BLE001
+        job.update(status="error", error=str(exc))
+    finally:
+        _ask_lock.release()
+
+
+class AskIn(BaseModel):
+    query: str
+
+
+@app.post("/api/ask/start")
+def ask_start(body: AskIn):
+    if not _ask_lock.acquire(blocking=False):
+        raise HTTPException(409, "A query is already running.")
+    run_id = uuid.uuid4().hex
+    _ask_jobs[run_id] = {"status": "running", "md_file": None,
+                         "markdown": None, "error": None}
+    threading.Thread(target=_run_ask, args=(run_id, body.query), daemon=True).start()
+    return {"run_id": run_id}
+
+
+@app.get("/api/ask/status")
+def ask_status(run_id: str):
+    job = _ask_jobs.get(run_id)
+    if not job:
+        raise HTTPException(404, "Unknown run.")
+    return {"status": job["status"], "error": job["error"], "md_file": job["md_file"]}
+
+
+@app.get("/api/exports")
+def list_exports():
+    EXPORTS.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for p in sorted(EXPORTS.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True):
+        st = p.stat()
+        rows.append({
+            "name": p.name,
+            "size": st.st_size,
+            "modified": datetime.datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+        })
+    return rows
+
+
+@app.get("/api/exports/{name}")
+def get_export(name: str):
+    if "/" in name or "\\" in name or ".." in name or not name.endswith(".md"):
+        raise HTTPException(400, "Invalid file name.")
+    p = EXPORTS / name
+    if not p.exists():
+        raise HTTPException(404, "Not found.")
+    return {"name": name, "content": p.read_text(encoding="utf-8")}
+
+
+@app.delete("/api/exports/{name}")
+def delete_export(name: str):
+    if "/" in name or "\\" in name or ".." in name or not name.endswith(".md"):
+        raise HTTPException(400, "Invalid file name.")
+    p = EXPORTS / name
+    if p.exists():
+        p.unlink()
+    return {"deleted": name}
 
 
 @app.get("/api/serp/runs")

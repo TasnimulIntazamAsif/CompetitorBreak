@@ -1,24 +1,96 @@
-"""SQLite access layer (scrape pipeline). No server required — the database is a
-local file. Uses RETURNING (SQLite >= 3.35) and UPSERT (>= 3.24)."""
+"""Database access layer (scrape pipeline). Supports SQLite (a local file, no
+server) and PostgreSQL. The same functions work against both: a target starting
+with ``postgres`` opens a Postgres connection wrapped in an adapter that
+translates the SQLite-flavoured SQL (``?`` placeholders, ``datetime('now')``,
+``GROUP_CONCAT``) to Postgres on the fly."""
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
+SCHEMA_PG_PATH = Path(__file__).resolve().parent / "schema_pg.sql"
 
 
 def _dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict[str, Any]:
     return {col[0]: row[i] for i, col in enumerate(cursor.description)}
 
 
+def _is_postgres(target: str) -> bool:
+    return target.startswith("postgres://") or target.startswith("postgresql://")
+
+
+# --- Postgres adapter: make SQLite-flavoured SQL run on Postgres -------------
+
+_GROUP_CONCAT_DISTINCT = re.compile(r"GROUP_CONCAT\(\s*DISTINCT\s+(.+?)\)", re.IGNORECASE | re.DOTALL)
+_GROUP_CONCAT = re.compile(r"GROUP_CONCAT\(\s*(.+?)\)", re.IGNORECASE | re.DOTALL)
+
+
+def _to_pg(sql: str) -> str:
+    """Translate the SQLite SQL used in this module to PostgreSQL."""
+    sql = sql.replace("?", "%s")
+    sql = sql.replace("datetime('now')", "now()")
+    sql = _GROUP_CONCAT_DISTINCT.sub(r"string_agg(DISTINCT (\1)::text, ',')", sql)
+    sql = _GROUP_CONCAT.sub(r"string_agg((\1)::text, ',')", sql)
+    return sql
+
+
+class _PgConn:
+    """Wraps a psycopg3 connection so db functions can keep calling
+    ``conn.execute(sql, params).fetchone()`` with SQLite-style SQL."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql: str, params: Iterable[Any] = ()):
+        p = tuple(params) if params else None
+        return self._conn.execute(_to_pg(sql), p)
+
+    def executescript(self, script: str) -> None:
+        # Strip SQL line comments first: the schema's header comments contain
+        # ';' which would otherwise split a comment into a bogus statement.
+        no_comments = re.sub(r"--[^\n]*", "", script)
+        for stmt in no_comments.split(";"):
+            if stmt.strip():
+                self._conn.execute(stmt)
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
 @contextmanager
-def connect(db_path: str) -> Iterator[sqlite3.Connection]:
-    """Open a SQLite connection; commit on success, rollback on error."""
-    conn = sqlite3.connect(db_path, timeout=10)
+def connect(target: str) -> Iterator[Any]:
+    """Open a DB connection (SQLite file path or Postgres URL); commit on
+    success, rollback on error."""
+    if _is_postgres(target):
+        import psycopg
+        from psycopg.rows import dict_row
+
+        # A remote Postgres can be slow to accept the first connection after an
+        # idle period (VPN / route warm-up), so allow a generous connect timeout.
+        raw = psycopg.connect(target, row_factory=dict_row, connect_timeout=30)
+        conn = _PgConn(raw)
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return
+
+    conn = sqlite3.connect(target, timeout=10)
     conn.row_factory = _dict_factory
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")   # concurrent reads during a write
@@ -33,14 +105,21 @@ def connect(db_path: str) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def init_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+def init_schema(conn: Any) -> None:
+    if isinstance(conn, _PgConn):
+        conn.executescript(SCHEMA_PG_PATH.read_text(encoding="utf-8"))
+    else:
+        conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     _migrate(conn)
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    """Lightweight migrations for existing databases (ADD COLUMN is a no-op in
-    the schema's CREATE TABLE IF NOT EXISTS)."""
+def _migrate(conn: Any) -> None:
+    """Lightweight migrations for existing databases (ADD COLUMN IF NOT EXISTS
+    on Postgres; PRAGMA-driven on SQLite)."""
+    if isinstance(conn, _PgConn):
+        conn.execute("ALTER TABLE page_keywords ADD COLUMN IF NOT EXISTS count INTEGER")
+        conn.execute("ALTER TABLE page_keywords ADD COLUMN IF NOT EXISTS density REAL")
+        return
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(page_keywords)")}
     if "count" not in cols:
         conn.execute("ALTER TABLE page_keywords ADD COLUMN count INTEGER")

@@ -210,6 +210,43 @@ def _parse_sitemap(fetcher: Fetcher, url: str, depth: int = 0) -> tuple[list[str
     return pages, nested
 
 
+def discover_all_pages(fetcher: Fetcher, domain: str, max_pages: int) -> list[str]:
+    """Return ALL same-site page URLs from the domain's sitemap(s) — no blog
+    filter — so the whole website can be crawled, up to max_pages."""
+    origin = _origin(domain)
+    host = urlparse(origin).netloc.lower().removeprefix("www.")
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(url: str) -> None:
+        if not url or url in seen:
+            return
+        try:
+            h = urlparse(url).netloc.lower().removeprefix("www.")
+        except ValueError:
+            return
+        if h != host:  # same registrable host only (skip external links)
+            return
+        seen.add(url)
+        found.append(url)
+
+    queue: list[str] = list(_sitemap_urls_from_robots(fetcher, origin))
+    queue.extend(urljoin(origin, path) for path in COMMON_SITEMAPS)
+    visited_maps: set[str] = set()
+    while queue and len(found) < max_pages:
+        sm = queue.pop(0)
+        if sm in visited_maps:
+            continue
+        visited_maps.add(sm)
+        pages, nested = _parse_sitemap(fetcher, sm)
+        for url in pages:
+            add(url)
+            if len(found) >= max_pages:
+                break
+        queue.extend(n for n in nested if n not in visited_maps)
+    return found[:max_pages]
+
+
 def discover_posts(
     fetcher: Fetcher,
     domain: str,

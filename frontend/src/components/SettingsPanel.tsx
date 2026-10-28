@@ -37,6 +37,8 @@ export function SettingsPanel() {
       serp_headless: s.serp_headless,
       serp_source: s.serp_source,
       dataforseo_location: s.dataforseo_location,
+      llm_source: s.llm_source,
+      llm_model: s.llm_model,
     }
     try {
       await api.saveSettings(body)
@@ -157,6 +159,46 @@ export function SettingsPanel() {
         <p className="hint">
           These defaults keep Google scraping volume low to avoid CAPTCHAs and rate limits —
           a longer SERP delay and fewer keywords per run are safer. Raise them only cautiously.
+        </p>
+
+        <h3>Query analysis (Claude web search)</h3>
+        <div className="row">
+          <label>
+            LLM source
+            <select value={s.llm_source} onChange={(e) => update('llm_source', e.target.value)}>
+              <option value="dataforseo">DataForSEO (reliable, real Google rankings)</option>
+              <option value="claude_cli">Claude Code CLI (local, no API key)</option>
+              <option value="anthropic">Anthropic API key</option>
+            </select>
+          </label>
+          <label>
+            Claude model
+            <input
+              value={s.llm_model}
+              onChange={(e) => update('llm_model', e.target.value)}
+              placeholder="claude-haiku-5-5"
+            />
+          </label>
+        </div>
+        <p className="hint">
+          {s.llm_source === 'dataforseo' ? (
+            <>
+              <strong>DataForSEO</strong> returns real Google rankings for the query (uses your
+              .env credentials + the DataForSEO location above — set it to <em>Bangladesh</em>{' '}
+              for BD queries). Reliable, no permission/quota issues.
+            </>
+          ) : s.llm_source === 'claude_cli' ? (
+            <>
+              <strong>Claude Code CLI</strong> uses your local <code>claude</code> login — no API
+              key. Headless web search can be blocked by permissions; if Analyze returns nothing,
+              use DataForSEO. The <code>claude-*</code> model applies here.
+            </>
+          ) : (
+            <>
+              <strong>Anthropic API key</strong> path needs <strong>ANTHROPIC_API_KEY</strong> in
+              .env. Billed per request/token.
+            </>
+          )}
         </p>
 
         <div className="actions">

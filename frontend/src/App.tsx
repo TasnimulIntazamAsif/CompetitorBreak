@@ -8,14 +8,29 @@ import { SettingsPanel } from './components/SettingsPanel'
 import { Collect } from './components/Collect'
 import { Rankings } from './components/Rankings'
 import { Reports } from './components/Reports'
+import { Analyze } from './components/Analyze'
+import { CrawlKeywords } from './components/CrawlKeywords'
+import { Store } from './components/Store'
 
-type Tab = 'overview' | 'competitors' | 'settings' | 'collect' | 'rankings' | 'reports'
+type Tab =
+  | 'overview'
+  | 'competitors'
+  | 'settings'
+  | 'collect'
+  | 'rankings'
+  | 'reports'
+  | 'analyze'
+  | 'competitor-keywords'
+  | 'store'
 
 const NAV: { id: Tab; label: string; title: string; subtitle: string }[] = [
   { id: 'overview', label: 'Overview', title: 'Overview', subtitle: 'Your competitor intelligence at a glance' },
   { id: 'competitors', label: 'Competitors', title: 'Competitors', subtitle: 'Domains you track, including your own' },
   { id: 'collect', label: 'Collect', title: 'Collect', subtitle: 'Scrape competitor blogs and extract target keywords' },
   { id: 'rankings', label: 'Rankings', title: 'Rankings', subtitle: 'Where competitors rank on Google (SERP)' },
+  { id: 'analyze', label: 'Analyze', title: 'Query analysis', subtitle: 'Rank sites for a query (Claude web search) + their on-page keywords' },
+  { id: 'competitor-keywords', label: 'Keywords', title: 'Competitor keyword index', subtitle: 'Crawl a site and list each keyword with the URLs it appears on and its frequency' },
+  { id: 'store', label: 'Store', title: 'Store', subtitle: 'Free-form Claude web-search queries saved as Markdown reports' },
   { id: 'reports', label: 'Reports', title: 'Reports', subtitle: 'Topics, gaps, overlap and ranking reports' },
   { id: 'settings', label: 'Settings', title: 'Settings', subtitle: 'Scraper and SERP configuration' },
 ]
@@ -57,8 +72,8 @@ export function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-mark">CB</span>
-          <span className="brand-name">CompetitorBreak</span>
+          <span className="brand-mark">CA</span>
+          <span className="brand-name">CompetitorANK</span>
         </div>
         <nav className="nav">
           {NAV.map((n) => (
@@ -97,6 +112,9 @@ export function App() {
           {tab === 'settings' && <SettingsPanel />}
           {tab === 'collect' && <Collect competitors={competitors} />}
           {tab === 'rankings' && <Rankings />}
+          {tab === 'analyze' && <Analyze />}
+          {tab === 'competitor-keywords' && <CrawlKeywords />}
+          {tab === 'store' && <Store />}
           {tab === 'reports' && <Reports competitors={competitors} />}
         </div>
       </div>

@@ -14,4 +14,12 @@ import uvicorn  # noqa: E402
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("backend.app:app", host="0.0.0.0", port=port, reload=False)
+    # Auto-reload for local dev: set RELOAD=1 (accepts 1/true/yes/on).
+    reload = os.getenv("RELOAD", "").lower() in ("1", "true", "yes", "on")
+    uvicorn.run(
+        "backend.app:app",
+        host="0.0.0.0",
+        port=port,
+        reload=reload,
+        reload_dirs=[str(ROOT / "backend"), str(ROOT / "src")] if reload else None,
+    )

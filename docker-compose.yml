@@ -1,14 +1,43 @@
 services:
+  # Always-on local PostgreSQL. Data persists in the `pgdata` volume, the
+  # container auto-restarts, and the app talks to it over the internal Docker
+  # network (host "db"), so the connection does not drop between runs.
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: competitorank
+      POSTGRES_PASSWORD: competitorank
+      POSTGRES_DB: competitorank
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U competitorank -d competitorank"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      # Host 5433 -> container 5432 (5432 on the host is often taken by a native
+      # Postgres). From the host connect to localhost:5433; the web container
+      # still talks to it internally over the Docker network as db:5432.
+      - "5433:5432"
+    restart: unless-stopped
+
   web:
     build: .
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
-      DB_PATH: /data/competitorbreak.db
+      # Point the app at the Postgres container (overrides any SQLite default).
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: competitorank
+      PGPASSWORD: competitorank
+      PGDATABASE: competitorank
       PORT: "8000"
-    volumes:
-      - cbdata:/data
     ports:
       - "8000:8000"
     restart: unless-stopped
 
 volumes:
-  cbdata:
+  pgdata:
