@@ -285,8 +285,16 @@ td.num, th.num { text-align: right; }
 .ckw-table th { color: var(--muted); font-weight: 600; font-size: 12px; }
 .ckw-table th.num, .ckw-table td.num { text-align: right; white-space: nowrap; }
 .ckw-table tbody tr:hover { background: var(--hover); }
-.ckw-table .kw-cell { font-weight: 600; vertical-align: top; border-right: 1px solid var(--border); }
+.ckw-table .kw-cell { font-weight: 600; vertical-align: top; border-right: 1px solid var(--border); width: 240px; }
 .ckw-url { max-width: 420px; word-break: break-all; }
+
+/* Store detail view: full-width report with a back/download bar */
+.store-view-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; flex-wrap: wrap; margin-bottom: 12px;
+}
+/* In the full-width report view the URL column has room, so wrap less. */
+.store-view .ckw-url { max-width: none; word-break: break-word; }
 .ckw-url a { color: var(--primary); text-decoration: none; }
 .ckw-url a:hover { text-decoration: underline; }
 

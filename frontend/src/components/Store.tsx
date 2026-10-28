@@ -134,17 +134,17 @@ export function Store() {
         </div>
       </div>
 
-      <div className="store-grid">
+      {!selected ? (
         <div className="card store-list">
           <div className="analyze-head" style={{ justifyContent: 'space-between' }}>
-            <h3 style={{ margin: 0 }}>Saved reports (.md)</h3>
+            <h3 style={{ margin: 0 }}>Saved reports</h3>
             <button className="link" onClick={load} title="Refresh">
               ⟳ Refresh
             </button>
           </div>
           {items.length === 0 && <p className="empty">Nothing saved yet.</p>}
           {items.map((it) => (
-            <div key={it.name} className={'store-item' + (selected === it.name ? ' active' : '')}>
+            <div key={it.name} className="store-item">
               <button className="store-name" onClick={() => view(it.name)} title={it.name}>
                 {it.name}
               </button>
@@ -155,78 +155,71 @@ export function Store() {
             </div>
           ))}
         </div>
+      ) : (
         <div className="card store-view">
-          {selected ? (
-            <>
-              <div className="analyze-head" style={{ justifyContent: 'space-between' }}>
-                <strong>{selected}</strong>
-                {crawl ? (
-                  <div className="actions" style={{ margin: 0 }}>
-                    {(['md', 'csv', 'xlsx', 'docx', 'pdf'] as const).map((fmt) => (
-                      <a
-                        key={fmt}
-                        className="btn-link"
-                        href={api.exportFileUrl(selected, fmt)}
-                        download
-                      >
-                        ⬇ .{fmt}
-                      </a>
-                    ))}
-                  </div>
-                ) : (
-                  <button onClick={download}>⬇ Download</button>
-                )}
+          <div className="store-view-bar">
+            <button className="link" onClick={() => { setSelected(null); setContent('') }}>
+              ← Reports
+            </button>
+            {crawl ? (
+              <div className="actions" style={{ margin: 0 }}>
+                {(['md', 'csv', 'xlsx', 'docx', 'pdf'] as const).map((fmt) => (
+                  <a key={fmt} className="btn-link" href={api.exportFileUrl(selected, fmt)} download>
+                    ⬇ .{fmt}
+                  </a>
+                ))}
               </div>
-              {crawl ? (
-                <>
-                  {crawl.domain && (
-                    <div className="analyze-head" style={{ margin: '4px 0 10px' }}>
-                      <span className="badge">{crawl.domain}</span>
-                      <span className="hint">{crawl.rows.length} keywords</span>
-                      {crawl.created && <span className="hint">{crawl.created.replace('T', ' ')}</span>}
-                    </div>
-                  )}
-                  <div className="scroll-table">
-                    <table className="ckw-table">
-                      <thead>
-                        <tr>
-                          <th>Keyword</th>
-                          <th>URL</th>
-                          <th className="num">Frequency</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {crawl.rows.map((r) =>
-                          r.urls.map((u, i) => (
-                            <tr key={`${r.keyword}-${u.url}`}>
-                              {i === 0 && (
-                                <td rowSpan={r.urls.length} className="kw-cell">
-                                  {r.keyword}
-                                  <span className="hint"> · {r.total}×</span>
-                                </td>
-                              )}
-                              <td className="ckw-url">
-                                <a href={u.url} target="_blank" rel="noreferrer">
-                                  {u.url}
-                                </a>
-                              </td>
-                              <td className="num">{u.count}</td>
-                            </tr>
-                          )),
+            ) : (
+              <button onClick={download}>⬇ Download</button>
+            )}
+          </div>
+          <div className="analyze-head" style={{ marginBottom: 10 }}>
+            <strong>{selected}</strong>
+            {crawl?.domain && (
+              <>
+                <span className="badge">{crawl.domain}</span>
+                <span className="hint">{crawl.rows.length} keywords</span>
+                {crawl.created && <span className="hint">{crawl.created.replace('T', ' ')}</span>}
+              </>
+            )}
+          </div>
+          {crawl ? (
+            <div className="scroll-table">
+              <table className="ckw-table">
+                <thead>
+                  <tr>
+                    <th>Keyword</th>
+                    <th>URL</th>
+                    <th className="num">Frequency</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {crawl.rows.map((r) =>
+                    r.urls.map((u, i) => (
+                      <tr key={`${r.keyword}-${u.url}`}>
+                        {i === 0 && (
+                          <td rowSpan={r.urls.length} className="kw-cell">
+                            {r.keyword}
+                            <span className="hint"> · {r.total}×</span>
+                          </td>
                         )}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              ) : (
-                <pre className="md-view">{content}</pre>
-              )}
-            </>
+                        <td className="ckw-url">
+                          <a href={u.url} target="_blank" rel="noreferrer">
+                            {u.url}
+                          </a>
+                        </td>
+                        <td className="num">{u.count}</td>
+                      </tr>
+                    )),
+                  )}
+                </tbody>
+              </table>
+            </div>
           ) : (
-            <p className="empty">Select a file to view its contents.</p>
+            <pre className="md-view">{content}</pre>
           )}
         </div>
-      </div>
+      )}
     </section>
   )
 }
