@@ -119,6 +119,8 @@ export const api = {
     req<{ status: string; error: string | null; md_file: string | null }>(
       'GET', `/api/ask/status?run_id=${runId}`,
     ),
+  exportFileUrl: (name: string, fmt: 'md' | 'csv' | 'xlsx' | 'docx' | 'pdf') =>
+    `${BASE}/api/exports/${encodeURIComponent(name)}/download?fmt=${fmt}`,
   listExports: () => req<ExportItem[]>('GET', '/api/exports'),
   getExport: (name: string) =>
     req<{ name: string; content: string }>('GET', `/api/exports/${encodeURIComponent(name)}`),

@@ -613,8 +613,18 @@ def _run_crawl_keywords(
         try:
             EXPORTS.mkdir(parents=True, exist_ok=True)
             slug = re.sub(r"[^a-z0-9]+", "-", domain.lower()).strip("-")[:40] or "domain"
-            md_file = f"crawl-keywords-{slug}-{run_id[:8]}.md"
-            (EXPORTS / md_file).write_text(md, encoding="utf-8")
+            # Store the result as structured JSON so the Store tab can render it
+            # as a table (keyword -> URLs -> frequency), not just raw text.
+            md_file = f"crawl-keywords-{slug}-{run_id[:8]}.json"
+            payload = {
+                "kind": "crawl-keywords",
+                "domain": domain,
+                "created": datetime.datetime.now().isoformat(timespec="seconds"),
+                "rows": rows,
+            }
+            (EXPORTS / md_file).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         except Exception:  # noqa: BLE001 - file write is best-effort
             md_file = None
 
@@ -748,11 +758,18 @@ def ask_status(run_id: str):
     return {"status": job["status"], "error": job["error"], "md_file": job["md_file"]}
 
 
+def _valid_export_name(name: str) -> bool:
+    return not ("/" in name or "\\" in name or ".." in name) and (
+        name.endswith(".md") or name.endswith(".json")
+    )
+
+
 @app.get("/api/exports")
 def list_exports():
     EXPORTS.mkdir(parents=True, exist_ok=True)
+    files = list(EXPORTS.glob("*.md")) + list(EXPORTS.glob("*.json"))
     rows = []
-    for p in sorted(EXPORTS.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True):
+    for p in sorted(files, key=lambda x: x.stat().st_mtime, reverse=True):
         st = p.stat()
         rows.append({
             "name": p.name,
@@ -764,7 +781,7 @@ def list_exports():
 
 @app.get("/api/exports/{name}")
 def get_export(name: str):
-    if "/" in name or "\\" in name or ".." in name or not name.endswith(".md"):
+    if not _valid_export_name(name):
         raise HTTPException(400, "Invalid file name.")
     p = EXPORTS / name
     if not p.exists():
@@ -774,12 +791,43 @@ def get_export(name: str):
 
 @app.delete("/api/exports/{name}")
 def delete_export(name: str):
-    if "/" in name or "\\" in name or ".." in name or not name.endswith(".md"):
+    if not _valid_export_name(name):
         raise HTTPException(400, "Invalid file name.")
     p = EXPORTS / name
     if p.exists():
         p.unlink()
     return {"deleted": name}
+
+
+@app.get("/api/exports/{name}/download")
+def export_file_as(name: str, fmt: str):
+    """Convert a saved crawl result (.json) to md/csv/xlsx/docx/pdf for download."""
+    if not _valid_export_name(name) or not name.endswith(".json"):
+        raise HTTPException(400, "Only saved crawl (.json) results can be converted.")
+    p = EXPORTS / name
+    if not p.exists():
+        raise HTTPException(404, "Not found.")
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        rows = data.get("rows") or []
+        domain = data.get("domain") or "domain"
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "File is not a valid crawl result.")
+
+    fmt = fmt.lower()
+    base = name[:-5]  # strip ".json"
+    if fmt == "md":
+        content = ckw.index_to_markdown(domain, rows).encode("utf-8")
+        media = "text/markdown"
+    elif fmt in exporters.GENERATORS:
+        content = exporters.GENERATORS[fmt](domain, rows)
+        media = exporters.MEDIA_TYPES[fmt]
+    else:
+        raise HTTPException(400, "Unsupported format. Use md, csv, xlsx, docx or pdf.")
+    return Response(
+        content=content, media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{base}.{fmt}"'},
+    )
 
 
 @app.get("/api/serp/runs")

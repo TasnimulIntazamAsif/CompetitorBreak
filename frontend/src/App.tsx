@@ -1,38 +1,17 @@
 import { useEffect, useState } from 'react'
-import type { Competitor } from './types'
-import { api } from './api'
 import { icons } from './icons'
 import { Overview } from './components/Overview'
-import { Competitors } from './components/Competitors'
 import { SettingsPanel } from './components/SettingsPanel'
-import { Collect } from './components/Collect'
-import { Rankings } from './components/Rankings'
-import { Reports } from './components/Reports'
-import { Analyze } from './components/Analyze'
 import { CrawlKeywords } from './components/CrawlKeywords'
 import { Store } from './components/Store'
 
-type Tab =
-  | 'overview'
-  | 'competitors'
-  | 'settings'
-  | 'collect'
-  | 'rankings'
-  | 'reports'
-  | 'analyze'
-  | 'competitor-keywords'
-  | 'store'
+type Tab = 'overview' | 'competitor-keywords' | 'store' | 'settings'
 
 const NAV: { id: Tab; label: string; title: string; subtitle: string }[] = [
-  { id: 'overview', label: 'Overview', title: 'Overview', subtitle: 'Your competitor intelligence at a glance' },
-  { id: 'competitors', label: 'Competitors', title: 'Competitors', subtitle: 'Domains you track, including your own' },
-  { id: 'collect', label: 'Collect', title: 'Collect', subtitle: 'Scrape competitor blogs and extract target keywords' },
-  { id: 'rankings', label: 'Rankings', title: 'Rankings', subtitle: 'Where competitors rank on Google (SERP)' },
-  { id: 'analyze', label: 'Analyze', title: 'Query analysis', subtitle: 'Rank sites for a query (Claude web search) + their on-page keywords' },
+  { id: 'overview', label: 'Overview', title: 'Overview', subtitle: 'Competitor keyword crawler at a glance' },
   { id: 'competitor-keywords', label: 'Keywords', title: 'Competitor keyword index', subtitle: 'Crawl a site and list each keyword with the URLs it appears on and its frequency' },
-  { id: 'store', label: 'Store', title: 'Store', subtitle: 'Free-form Claude web-search queries saved as Markdown reports' },
-  { id: 'reports', label: 'Reports', title: 'Reports', subtitle: 'Topics, gaps, overlap and ranking reports' },
-  { id: 'settings', label: 'Settings', title: 'Settings', subtitle: 'Scraper and SERP configuration' },
+  { id: 'store', label: 'Store', title: 'Store', subtitle: 'Saved keyword crawls (structured) and Claude web-search reports' },
+  { id: 'settings', label: 'Settings', title: 'Settings', subtitle: 'Scraper configuration' },
 ]
 
 type Theme = 'light' | 'dark'
@@ -49,13 +28,7 @@ function initialTheme(): Theme {
 
 export function App() {
   const [tab, setTab] = useState<Tab>('overview')
-  const [competitors, setCompetitors] = useState<Competitor[]>([])
   const [theme, setTheme] = useState<Theme>(initialTheme)
-
-  const reload = () => {
-    api.competitors().then(setCompetitors).catch(() => undefined)
-  }
-  useEffect(reload, [])
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -108,14 +81,9 @@ export function App() {
         </header>
         <div className="content">
           {tab === 'overview' && <Overview onNavigate={(t) => setTab(t as Tab)} />}
-          {tab === 'competitors' && <Competitors competitors={competitors} reload={reload} />}
-          {tab === 'settings' && <SettingsPanel />}
-          {tab === 'collect' && <Collect competitors={competitors} />}
-          {tab === 'rankings' && <Rankings />}
-          {tab === 'analyze' && <Analyze />}
           {tab === 'competitor-keywords' && <CrawlKeywords />}
           {tab === 'store' && <Store />}
-          {tab === 'reports' && <Reports competitors={competitors} />}
+          {tab === 'settings' && <SettingsPanel />}
         </div>
       </div>
     </div>

@@ -1,7 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
-import type { ExportItem } from '../types'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ExportItem, KeywordIndexRow } from '../types'
 import { api } from '../api'
 import { useToast } from '../toast'
+
+interface CrawlResult {
+  kind?: string
+  domain?: string
+  created?: string
+  rows: KeywordIndexRow[]
+}
 
 export function Store() {
   const toast = useToast()
@@ -92,6 +99,18 @@ export function Store() {
     }
   }
 
+  // Crawl results are stored as .json — parse them to render a structured table.
+  const crawl = useMemo<CrawlResult | null>(() => {
+    if (!selected || !selected.endsWith('.json') || !content) return null
+    try {
+      const data = JSON.parse(content)
+      if (Array.isArray(data?.rows)) return data as CrawlResult
+    } catch {
+      /* not valid JSON */
+    }
+    return null
+  }, [selected, content])
+
   return (
     <section>
       <div className="card">
@@ -141,9 +160,67 @@ export function Store() {
             <>
               <div className="analyze-head" style={{ justifyContent: 'space-between' }}>
                 <strong>{selected}</strong>
-                <button onClick={download}>⬇ Download</button>
+                {crawl ? (
+                  <div className="actions" style={{ margin: 0 }}>
+                    {(['md', 'csv', 'xlsx', 'docx', 'pdf'] as const).map((fmt) => (
+                      <a
+                        key={fmt}
+                        className="btn-link"
+                        href={api.exportFileUrl(selected, fmt)}
+                        download
+                      >
+                        ⬇ .{fmt}
+                      </a>
+                    ))}
+                  </div>
+                ) : (
+                  <button onClick={download}>⬇ Download</button>
+                )}
               </div>
-              <pre className="md-view">{content}</pre>
+              {crawl ? (
+                <>
+                  {crawl.domain && (
+                    <div className="analyze-head" style={{ margin: '4px 0 10px' }}>
+                      <span className="badge">{crawl.domain}</span>
+                      <span className="hint">{crawl.rows.length} keywords</span>
+                      {crawl.created && <span className="hint">{crawl.created.replace('T', ' ')}</span>}
+                    </div>
+                  )}
+                  <div className="scroll-table">
+                    <table className="ckw-table">
+                      <thead>
+                        <tr>
+                          <th>Keyword</th>
+                          <th>URL</th>
+                          <th className="num">Frequency</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {crawl.rows.map((r) =>
+                          r.urls.map((u, i) => (
+                            <tr key={`${r.keyword}-${u.url}`}>
+                              {i === 0 && (
+                                <td rowSpan={r.urls.length} className="kw-cell">
+                                  {r.keyword}
+                                  <span className="hint"> · {r.total}×</span>
+                                </td>
+                              )}
+                              <td className="ckw-url">
+                                <a href={u.url} target="_blank" rel="noreferrer">
+                                  {u.url}
+                                </a>
+                              </td>
+                              <td className="num">{u.count}</td>
+                            </tr>
+                          )),
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              ) : (
+                <pre className="md-view">{content}</pre>
+              )}
             </>
           ) : (
             <p className="empty">Select a file to view its contents.</p>

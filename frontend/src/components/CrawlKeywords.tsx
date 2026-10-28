@@ -152,6 +152,7 @@ export function CrawlKeywords() {
               <span className="badge">{domain.trim()}</span>
               <span className="hint">{rows.length} keywords</span>
             </div>
+            <div className="scroll-table">
             <table className="ckw-table">
               <thead>
                 <tr>
@@ -181,6 +182,7 @@ export function CrawlKeywords() {
                 )}
               </tbody>
             </table>
+            </div>
           </div>
         </>
       )}
