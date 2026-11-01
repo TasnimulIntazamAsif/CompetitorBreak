@@ -1,42 +1,35 @@
-# CompetitorBreak
+# CompetitorANK
 
-Find out **which keywords your competitors target in their blogs**, store it in
-a local **SQLite** file, and surface **content gaps** against your own domain —
-using pure **Python + BeautifulSoup** scraping. No paid SEO API, no DB server.
+Crawl a competitor's website and build a **keyword index**: every keyword its
+pages target, the URLs it appears on, and how often. Results are saved to a
+**Store** you can browse later and export as **CSV / XLSX / DOCX / PDF**.
 
-## What it can and can't do
+A second tool, **Ask**, runs a free-form Claude web-search query and saves the
+answer as a Markdown report in the same Store.
 
-- ✅ **Which keywords competitors target** — scrapes each blog post's title,
-  headings, tags, meta keywords, URL slug and body (hybrid `requests` + a
-  Playwright/Chromium fallback for JavaScript-rendered pages), then extracts the
-  target keyword(s) via stopword-filtered n-gram scoring.
-- ✅ **Topic frequency / content gaps / overlap** vs your own domain.
-- ⚠ **SERP ranking positions** — optional, via **Playwright Google scraping**
-  (`serp` command / Rankings tab). This finds where competitors rank for the
-  target keywords. **Best-effort only:** scraping Google is against its Terms of
-  Service and hits CAPTCHAs, rate limits and location variance. Keep volume low;
-  for reliable data a paid SERP/SEO API is the proper source.
-
-### Pipeline
-
-```
-Playwright + Sitemap  →  Keyword Extraction  →  SERP collection
-(blog URLs + content)    (title/headings/NLP)    (ranking keyword, URL, position)
-```
+Pure **Python + BeautifulSoup** scraping (with a Playwright/Chromium fallback for
+JavaScript-rendered pages) — no paid SEO API needed for the keyword crawl.
 
 ## How it works
 
 ```
-competitors.yaml ──► collect (sitemap/crawl + scrape + extract) ──► SQLite ──► report
+domain ──► discover pages ──► scrape each page ──► extract keywords ──► index ──► Store / export
+           (robots.txt,        (requests, then      (title, headings,    keyword → URLs
+            sitemaps, blog      Playwright if JS)    meta, slug, body;    → frequency
+            index crawl)                             n-gram scoring)
 ```
 
-1. **Discover** blog URLs from `robots.txt` sitemaps, common sitemap paths, or a
-   blog-index crawl — kept only if they match `blog_path_patterns`.
-2. **Scrape** each post (polite delay, respects `robots.txt`).
-3. **Extract** target keywords (primary + tags + content n-grams) → `page_keywords`.
-4. **Report** top topics, per-post targets, gaps and overlap.
+1. **Discover** URLs from `robots.txt` sitemaps, common sitemap paths, or a
+   blog-index crawl. By default only content pages matching
+   `blog_path_patterns` are kept; **all pages** mode takes the whole sitemap.
+2. **Scrape** each page politely (respects `robots.txt` by default).
+3. **Extract** the keywords each page is densest in, via stopword-filtered
+   n-gram scoring (no NLP dependencies).
+4. **Index** them as `keyword → [{url, count}]`, sorted by total frequency.
 
 ## Setup
+
+Requires Python 3.11+ and Node 18+.
 
 ```bash
 .venv/Scripts/python -m pip install -r requirements.txt
@@ -47,93 +40,117 @@ competitors.yaml ──► collect (sitemap/crawl + scrape + extract) ──► 
 ```bash
 cd frontend && npm install && npm run build && cd ..
 ```
-Configure `.env` (copy from `.env.example`):
-- `DB_PATH` — SQLite file path (default `competitorbreak.db` in the project root).
-  Created automatically; no server needed.
-- `MAX_PAGES`, `CRAWL_DELAY`, `RESPECT_ROBOTS` — scraper behaviour.
 
-Edit `competitors.yaml` — set your own domain under `self` and list competitors.
+Copy `.env.example` to `.env` and configure the database:
 
-## Usage
+- **PostgreSQL** — set `DATABASE_URL`, or `PGHOST` / `PGPORT` / `PGUSER` /
+  `PGPASSWORD` / `PGDATABASE` (the database must already exist). If any
+  Postgres host is set, Postgres is used.
+- **SQLite** (fallback) — `DB_PATH`, default `competitorbreak.db` in the
+  project root. Created automatically.
 
-```bash
-python cb.py init-db                 # create tables
-python cb.py sync-config             # load self + competitors from YAML
-python cb.py check                   # verify Postgres
+Scraper defaults: `MAX_PAGES`, `CRAWL_DELAY`, `RESPECT_ROBOTS`.
 
-python cb.py collect                             # scrape all competitors
-python cb.py collect --competitor rival.com --max-pages 100
+The **Ask** feature uses the `claude` CLI (your existing Claude Code login) for
+web search, so it needs `claude` on `PATH`.
 
-python cb.py report topics rival.com             # their most-targeted keywords
-python cb.py report posts rival.com              # per-post primary keyword
-python cb.py report gaps                         # they target, we don't
-python cb.py report overlap rival.com            # shared targets
+`competitors.yaml` holds your own domain (`self`), seed competitors, and the
+default `blog_path_patterns`.
 
-# rankings (Playwright Google scrape — best-effort)
-python cb.py serp --limit 20                     # check top target terms
-python cb.py serp -k "hr software" -k "payroll"  # specific keywords
-python cb.py report rankings rival.com           # where they rank
-python cb.py report serp "hr software"           # full SERP for a keyword
-```
+## Web app
 
-(After `pip install -e .` the same commands are available as `cb ...`.)
-
-## Web app (backend + frontend)
-
-Prefer a UI? The repo ships a separate **backend** (FastAPI JSON API) and
-**frontend** (Vite + React + TypeScript, styled with plain CSS). Manage
-competitors, edit scraper settings, trigger collection/SERP and view reports
-from the browser.
-
-Build the frontend once (needs Node 18+), then run the backend:
-
-```bash
-cd frontend && npm install && npm run build && cd ..
-```
 ```bash
 .venv/Scripts/python backend/run.py
 ```
 
-Then open **http://localhost:8000** — the backend serves the built UI
-(`frontend/dist`) and the API at `/api/*`. Settings and competitors live in the
-same SQLite DB, so the UI and the `cb` CLI share one dataset.
+Open **http://localhost:8000**. The FastAPI backend serves the built UI
+(`frontend/dist`) and the API at `/api/*`. Set `PORT` to change the port and
+`RELOAD=1` for auto-reload while developing.
+
+Tabs:
+
+| Tab | Purpose |
+|---|---|
+| **Overview** | What the tool does, at a glance |
+| **Keywords** | Enter a domain, crawl it, view the keyword index, export it |
+| **Store** | Saved crawls (structured keyword → URL → frequency view) and Ask reports; download or delete |
+| **Settings** | Blog path patterns, max pages, crawl delay, robots.txt, LLM options |
 
 **Frontend dev loop:** `cd frontend && npm run dev` runs Vite on
 http://localhost:5173 and proxies `/api` to the backend on :8000 (run both). To
-point the UI at a different backend origin, set
+point the UI at a different backend, run
 `localStorage.setItem('cb_api', 'http://host:8000')` in the browser console.
 
-### Key API endpoints
+## CLI
+
+```bash
+python cb.py init-db                       # create tables
+python cb.py check                         # verify the database connection
+python cb.py sync-config                   # load self + competitors from competitors.yaml
+python cb.py list-competitors
+python cb.py add-competitor rival.com
+
+python cb.py crawl-keywords rival.com                       # content pages, default 15
+python cb.py crawl-keywords rival.com --all --max-pages 500 # whole sitemap
+python cb.py crawl-keywords rival.com --out rival.md
+
+python cb.py ask "best HR software in Bangladesh"           # Claude web search → exports/*.md
+
+python cb.py migrate-to-pg                 # copy an existing SQLite DB into Postgres
+```
+
+(After `pip install -e .` the same commands are available as `cb ...`.)
+
+Reports are written to `exports/` (git-ignored) unless `--out` is given.
+
+## API
 
 | Method & path | Purpose |
 |---|---|
-| `GET/POST /api/competitors`, `PUT/DELETE /api/competitors/{id}` | manage domains |
-| `GET/PUT /api/settings` | blog patterns, max pages, delay, robots, SERP options |
-| `POST /api/collect` `{domain?}`, `GET /api/collect/status`, `GET /api/runs` | scrape + progress |
-| `POST /api/serp/collect`, `GET /api/serp/status`, `GET /api/serp/runs` | rankings scrape |
-| `GET /api/keywords` | distinct target terms |
-| `GET /api/reports/{topics,posts,gaps,overlap,rankings,serp}` | reports |
+| `GET/PUT /api/settings` | scraper and LLM settings (stored in the DB) |
+| `POST /api/crawl-keywords/start` `{domain, max_pages, max_keywords, all_pages}` | start a crawl → `run_id` |
+| `GET /api/crawl-keywords/status?run_id=` | progress |
+| `GET /api/crawl-keywords/results?run_id=` | the keyword index |
+| `GET /api/crawl-keywords/export?run_id=&fmt=csv\|xlsx\|docx\|pdf` | download an export |
+| `POST /api/ask/start` `{query}`, `GET /api/ask/status?run_id=` | Claude web-search report |
+| `GET /api/exports`, `GET/DELETE /api/exports/{name}`, `GET /api/exports/{name}/download` | the Store |
+
+Limits: crawls are capped at 40 pages (2000 with `all_pages`) and 20 keywords
+per page. One crawl and one Ask run at a time. Job progress is held in memory,
+so a restart drops in-flight jobs; finished results are kept as files in
+`exports/`.
+
+## Docker
+
+```bash
+docker compose up -d --build
+```
+
+Starts PostgreSQL 16 (data in the `pgdata` volume, exposed on host port 5433)
+and the web app on **http://localhost:8000**. The image builds the frontend,
+installs Chromium for Playwright, and runs `init-db` + `sync-config` on boot.
 
 ## Project layout
 
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
-| `src/competitorbreak/config.py` | load `.env` + `competitors.yaml` |
-| `src/competitorbreak/db.py` | SQLite access layer |
-| `src/competitorbreak/schema.sql` | SQLite schema |
-| `src/competitorbreak/scraper.py` | sitemap/blog discovery + post parsing (Playwright fallback) |
-| `src/competitorbreak/keywords.py` | n-gram keyword extraction (no NLP deps) |
-| `src/competitorbreak/serp.py` | Playwright Google SERP scraper (rankings) |
-| `src/competitorbreak/collector.py` | scrape + persist orchestration |
-| `src/competitorbreak/reports.py` | topics / gaps / overlap queries |
+| `src/competitorbreak/config.py` | load `.env` + `competitors.yaml`, pick Postgres or SQLite |
+| `src/competitorbreak/db.py` | database access layer (Postgres + SQLite) |
+| `src/competitorbreak/schema_pg.sql`, `schema.sql` | Postgres / SQLite schemas |
+| `src/competitorbreak/scraper.py` | page discovery + parsing (Playwright fallback) |
+| `src/competitorbreak/keywords.py` | n-gram keyword extraction |
+| `src/competitorbreak/competitor_keywords.py` | crawl → keyword index, Markdown rendering |
+| `src/competitorbreak/exporters.py` | CSV / XLSX / DOCX / PDF export |
+| `src/competitorbreak/llm_search.py` | Claude web search (`claude` CLI or Anthropic API) |
+| `src/competitorbreak/serp.py` | shared SERP types and domain helpers |
 | `src/competitorbreak/cli.py` | Click CLI |
-| `backend/app.py` | FastAPI JSON API + serves the built frontend |
-| `backend/run.py` | `python backend/run.py` launcher (uvicorn) |
-| `frontend/` | Vite + React + TypeScript UI (`src/*.tsx`, plain CSS) |
+| `backend/app.py` | FastAPI API + serves the built frontend |
+| `backend/run.py` | uvicorn launcher |
+| `frontend/` | Vite + React + TypeScript UI (plain CSS) |
 
 ## Notes
 
 - Scraping respects `robots.txt` by default (`RESPECT_ROBOTS=false` to disable)
-  and waits `CRAWL_DELAY` seconds between requests.
-- The database is a single SQLite file (`DB_PATH`), git-ignored. Back it up by
-  copying the file; inspect it with any SQLite browser.
+  and waits between requests.
+- The API has no authentication and allows all CORS origins; put it behind an
+  authenticating proxy if it's exposed publicly.
