@@ -100,7 +100,10 @@ export const api = {
       all_pages: allPages,
     }),
   crawlStatus: (runId: string) =>
-    req<{ status: string; error: string | null; count: number }>(
+    req<{
+      status: string; error: string | null; count: number
+      done: number; total: number | null; resumed: number
+    }>(
       'GET', `/api/crawl-keywords/status?run_id=${runId}`,
     ),
   crawlResults: (runId: string) =>

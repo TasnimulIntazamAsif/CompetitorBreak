@@ -13,6 +13,9 @@ export function CrawlKeywords() {
   const [mdFile, setMdFile] = useState<string | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
+  const [progress, setProgress] = useState<
+    { done: number; total: number | null; resumed: number } | null
+  >(null)
   const timer = useRef<number | null>(null)
 
   useEffect(() => () => {
@@ -23,6 +26,7 @@ export function CrawlKeywords() {
     try {
       const st = await api.crawlStatus(runId)
       if (st.status === 'running') {
+        setProgress({ done: st.done, total: st.total, resumed: st.resumed })
         timer.current = window.setTimeout(() => poll(runId), 3000)
         return
       }
@@ -50,6 +54,7 @@ export function CrawlKeywords() {
     setMarkdown(null)
     setMdFile(null)
     setRunId(null)
+    setProgress(null)
     setRunning(true)
     try {
       // "All pages" needs a big cap so the whole sitemap is crawled.
@@ -81,7 +86,8 @@ export function CrawlKeywords() {
           Enter a competitor website (e.g. <em>pihr.com</em>). It crawls the site’s pages and
           builds a <strong>keyword index</strong>: for each specific keyword, which URLs contain
           it and how often (frequency). No AI, no rank data — it reads the actual page content.
-          Tick <strong>All pages</strong> to crawl the whole sitemap. Runs in the background.
+          Tick <strong>All pages</strong> to crawl the whole sitemap. Runs in the background;
+          if it stops partway, run the same crawl again to resume where it left off.
         </p>
         <div className="row">
           <label>
@@ -120,7 +126,12 @@ export function CrawlKeywords() {
 
       {running && (
         <p className="empty">
-          Crawling pages + building the keyword index in the background…
+          {progress?.total
+            ? `Crawled ${progress.done} / ${progress.total} pages…`
+            : 'Discovering pages…'}
+          {progress?.resumed
+            ? ` Resumed from a saved checkpoint (${progress.resumed} pages already done).`
+            : ''}
           {allPages && ' Crawling the whole sitemap can take several minutes for a large site.'}
         </p>
       )}

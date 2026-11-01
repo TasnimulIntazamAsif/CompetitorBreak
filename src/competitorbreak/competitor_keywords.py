@@ -402,41 +402,70 @@ def crawl_keyword_index(
     min_count: int = 2,
     min_words: int = 2,
     log: Logger = _noop,
+    progress: Callable[[int, int], None] | None = None,
+    resume: dict | None = None,
+    on_urls: Callable[[list[str]], None] | None = None,
+    on_page: Callable[[str, dict[str, int]], None] | None = None,
 ) -> list[dict]:
     """Crawl the site and build a keyword -> URLs index: for each specific keyword,
     which pages contain it and how often (frequency).
 
     Returns [{keyword, total, pages, urls:[{url, count}]}], sorted by total
     frequency. "Specific" = multi-word phrases appearing at least `min_count`
-    times on a page, so generic single words are filtered out."""
-    log(f"  discovering pages for {domain} ...")
-    if all_pages:
-        urls = discover_all_pages(fetcher, domain, max_pages)
+    times on a page, so generic single words are filtered out.
+
+    Checkpointing: `on_urls` gets the discovered URL list and `on_page` each
+    page's {keyword: count} as it is crawled. Passing that saved state back as
+    `resume` ({"urls": [...], "pages": {url: {keyword: count}}}) skips discovery
+    and every page already done, so a stopped crawl picks up where it left off."""
+    if resume and resume.get("urls"):
+        urls = list(resume["urls"])
+        log(f"  resuming {domain}: {len(resume.get('pages') or {})}/{len(urls)} page(s) done")
     else:
-        urls = discover_posts(fetcher, domain, blog_patterns, max_pages)
-    if not urls:
-        home = domain if domain.startswith("http") else f"https://{domain.strip().strip('/')}"
-        urls = [home]
+        log(f"  discovering pages for {domain} ...")
+        if all_pages:
+            urls = discover_all_pages(fetcher, domain, max_pages)
+        else:
+            urls = discover_posts(fetcher, domain, blog_patterns, max_pages)
+        if not urls:
+            home = domain if domain.startswith("http") else f"https://{domain.strip().strip('/')}"
+            urls = [home]
+        if on_urls:
+            on_urls(urls)
     log(f"  {len(urls)} page(s); building keyword index ...")
+
+    # url -> {keyword: count}; empty for pages that were skipped (no content).
+    pages: dict[str, dict[str, int]] = dict((resume or {}).get("pages") or {})
+    for i, url in enumerate(urls):
+        if progress:
+            progress(i, len(urls))
+        if url in pages:
+            continue
+        terms: dict[str, int] = {}
+        post = scrape_post(fetcher, url)
+        if post is not None and post.word_count >= 50:
+            ex = keywords.extract(
+                title=post.title, headings=post.headings, body=post.body,
+                url=post.url, tags=post.tags, meta_keywords=post.meta_keywords,
+            )
+            for term, _score in ex.candidates[:top_per_page]:
+                if len(term.split()) < min_words:
+                    continue  # keep specific multi-word phrases only
+                c = keywords.count_occurrences(post.body, term)
+                if c >= min_count:
+                    terms[term] = c
+            log(f"  indexed {post.url}")
+        pages[url] = terms
+        if on_page:
+            on_page(url, terms)
+    if progress:
+        progress(len(urls), len(urls))
 
     # keyword -> {url: count}
     index: dict[str, dict[str, int]] = {}
-    for url in urls:
-        post = scrape_post(fetcher, url)
-        if post is None or post.word_count < 50:
-            continue
-        ex = keywords.extract(
-            title=post.title, headings=post.headings, body=post.body,
-            url=post.url, tags=post.tags, meta_keywords=post.meta_keywords,
-        )
-        for term, _score in ex.candidates[:top_per_page]:
-            if len(term.split()) < min_words:
-                continue  # keep specific multi-word phrases only
-            c = keywords.count_occurrences(post.body, term)
-            if c < min_count:
-                continue
-            index.setdefault(term, {})[post.url] = c
-        log(f"  indexed {post.url}")
+    for url, terms in pages.items():
+        for term, c in terms.items():
+            index.setdefault(term, {})[url] = c
 
     rows: list[dict] = []
     for term, urlmap in index.items():

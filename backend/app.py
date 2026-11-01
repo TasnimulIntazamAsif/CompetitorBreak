@@ -13,6 +13,7 @@ import pathlib
 import re
 import sys
 import threading
+import time
 import uuid
 
 # Make the core package importable (src/ layout).
@@ -128,14 +129,86 @@ EXPORTS = ROOT / "exports"
 # --- site crawl (domain -> per-page keyword density, no LLM) --------------
 
 _crawl_jobs: dict[str, dict] = {}
-_crawl_lock = threading.Lock()
+_crawl_guard = threading.Lock()  # guards _crawl_current only
+_crawl_current: str | None = None
+
+# A crawl that makes no progress for this long is treated as hung (e.g. a wedged
+# headless browser) and failed, so it can't block every later crawl forever.
+CRAWL_STALL_SECS = 180
+
+
+def _check_stall(job: dict) -> None:
+    """Fail a running job whose heartbeat is older than CRAWL_STALL_SECS."""
+    if job["status"] == "running" and time.monotonic() - job["heartbeat"] > CRAWL_STALL_SECS:
+        job.update(status="error", error=(
+            f"Crawl stalled (no progress for {CRAWL_STALL_SECS // 60} minutes) and was "
+            "stopped. Try again, or crawl fewer pages."
+        ))
+
+
+# In-progress crawl state, saved as it goes so a server stop/restart doesn't
+# lose finished pages: starting the same crawl again resumes from here.
+# (A subfolder, so the Store's *.json listing doesn't pick these up.)
+CHECKPOINTS = EXPORTS / "checkpoints"
+CHECKPOINT_EVERY_PAGES = 10
+CHECKPOINT_EVERY_SECS = 20.0
+
+
+def _checkpoint_path(domain: str, all_pages: bool, max_pages: int) -> pathlib.Path:
+    slug = re.sub(r"[^a-z0-9]+", "-", domain.lower()).strip("-")[:60] or "domain"
+    return CHECKPOINTS / f"{slug}-{'all' if all_pages else 'blog'}-{max_pages}.json"
+
+
+def _load_checkpoint(path: pathlib.Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("urls") else None
+
+
+def _write_checkpoint(path: pathlib.Path, state: dict) -> None:
+    try:
+        CHECKPOINTS.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)  # atomic, so a kill mid-write can't corrupt it
+    except OSError:
+        pass  # best-effort
 
 
 def _run_crawl_keywords(
     run_id: str, domain: str, max_pages: int, n: int, all_pages: bool
 ) -> None:
+    global _crawl_current
     job = _crawl_jobs[run_id]
     cfg = _read_settings()
+
+    def beat(done: int, total: int) -> None:
+        job.update(done=done, total=total, heartbeat=time.monotonic())
+
+    ckpt_path = _checkpoint_path(domain, all_pages, max_pages)
+    resume = _load_checkpoint(ckpt_path)
+    state = resume or {"domain": domain, "all_pages": all_pages,
+                       "max_pages": max_pages, "urls": [], "pages": {}}
+    job["resumed"] = len(state["pages"])
+    unsaved = 0
+    last_save = time.monotonic()
+
+    def on_urls(urls: list[str]) -> None:
+        state["urls"] = urls
+        _write_checkpoint(ckpt_path, state)
+
+    def on_page(url: str, terms: dict[str, int]) -> None:
+        nonlocal unsaved, last_save
+        if job["status"] != "running":
+            return  # failed as stalled; a retry may own the checkpoint now
+        state["pages"][url] = terms
+        unsaved += 1
+        if unsaved >= CHECKPOINT_EVERY_PAGES or time.monotonic() - last_save > CHECKPOINT_EVERY_SECS:
+            _write_checkpoint(ckpt_path, state)
+            unsaved, last_save = 0, time.monotonic()
+
     try:
         fetcher = Fetcher(
             delay=0.5, respect_robots=bool(cfg["respect_robots"]), use_playwright=True
@@ -145,9 +218,15 @@ def _run_crawl_keywords(
                 fetcher, domain,
                 blog_patterns=list(cfg.get("blog_path_patterns") or SETTINGS.blog_path_patterns),
                 max_pages=max_pages, all_pages=all_pages,
+                log=lambda _m: job.update(heartbeat=time.monotonic()), progress=beat,
+                resume=resume, on_urls=on_urls, on_page=on_page,
             )
+        except BaseException:
+            _write_checkpoint(ckpt_path, state)  # keep what's done for the retry
+            raise
         finally:
             fetcher.close()
+        ckpt_path.unlink(missing_ok=True)  # finished: nothing left to resume
 
         md = ckw.index_to_markdown(domain, rows)
         md_file = None
@@ -169,11 +248,16 @@ def _run_crawl_keywords(
         except Exception:  # noqa: BLE001 - file write is best-effort
             md_file = None
 
-        job.update(status="success", results=rows, markdown=md, md_file=md_file)
+        # A job already failed as stalled keeps that result.
+        if job["status"] == "running":
+            job.update(status="success", results=rows, markdown=md, md_file=md_file)
     except Exception as exc:  # noqa: BLE001
-        job.update(status="error", error=str(exc))
+        if job["status"] == "running":
+            job.update(status="error", error=str(exc))
     finally:
-        _crawl_lock.release()
+        with _crawl_guard:
+            if _crawl_current == run_id:
+                _crawl_current = None
 
 
 class CrawlKeywordsIn(BaseModel):
@@ -185,19 +269,26 @@ class CrawlKeywordsIn(BaseModel):
 
 @app.post("/api/crawl-keywords/start")
 def crawl_keywords_start(body: CrawlKeywordsIn):
+    global _crawl_current
     if not body.domain.strip():
         raise HTTPException(400, "Enter a domain.")
-    if not _crawl_lock.acquire(blocking=False):
-        raise HTTPException(409, "A crawl is already running.")
     # Whole-site crawls can be large, so allow a much higher cap with --all.
     cap = 2000 if body.all_pages else 40
     pages_n = max(1, min(body.max_pages, cap))
     n = max(1, min(body.max_keywords, 20))
     run_id = uuid.uuid4().hex
-    _crawl_jobs[run_id] = {
-        "status": "running", "domain": body.domain, "results": None,
-        "error": None, "markdown": None, "md_file": None,
-    }
+    with _crawl_guard:
+        current = _crawl_jobs.get(_crawl_current) if _crawl_current else None
+        if current:
+            _check_stall(current)
+            if current["status"] == "running":
+                raise HTTPException(409, "A crawl is already running.")
+        _crawl_current = run_id
+        _crawl_jobs[run_id] = {
+            "status": "running", "domain": body.domain, "results": None,
+            "error": None, "markdown": None, "md_file": None,
+            "done": 0, "total": None, "heartbeat": time.monotonic(), "resumed": 0,
+        }
     threading.Thread(
         target=_run_crawl_keywords,
         args=(run_id, body.domain.strip(), pages_n, n, body.all_pages), daemon=True
@@ -210,8 +301,10 @@ def crawl_keywords_status(run_id: str):
     job = _crawl_jobs.get(run_id)
     if not job:
         raise HTTPException(404, "Unknown run.")
+    _check_stall(job)
     return {"status": job["status"], "error": job["error"],
-            "count": len(job["results"] or [])}
+            "count": len(job["results"] or []),
+            "done": job["done"], "total": job["total"], "resumed": job["resumed"]}
 
 
 @app.get("/api/crawl-keywords/results")

@@ -71,6 +71,9 @@ class Fetcher:
         self._last_request = 0.0
         self._pw = None
         self._browser = None
+        # Consecutive render failures; Playwright is switched off after a few so
+        # one wedged/crashed browser can't stall the rest of the crawl.
+        self._render_failures = 0
 
     def _sleep(self) -> None:
         elapsed = time.monotonic() - self._last_request
@@ -146,14 +149,23 @@ class Fetcher:
         try:
             browser = self._ensure_browser()
             page = browser.new_page(user_agent=USER_AGENT)
+            # Bound every page operation (content(), etc.), not just goto —
+            # otherwise a hung renderer blocks the crawl thread forever.
+            page.set_default_timeout(self.timeout * 1000)
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
                 page.wait_for_timeout(1500)  # give client-side JS time to render
-                return page.content()
+                html = page.content()
             finally:
                 page.close()
         except Exception:
+            self._render_failures += 1
+            if self._render_failures >= 3:
+                self.close()
+                self.use_playwright = False  # plain requests for the rest of the run
             return None
+        self._render_failures = 0
+        return html
 
     def close(self) -> None:
         """Shut down the Playwright browser if it was started."""
